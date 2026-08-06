@@ -287,3 +287,104 @@ Step 0(基盤整備)→ Step 1(タイム経済の可視化)→ Step 2(★1警官
 - 特に「パトカー2台が必ず別々の交差点から湧く」「降車が車の左右ドア横に見える」「被弾フラッシュがオレンジで見やすいか」は実機の見た目でしか判断できないため重点的に確認する
 - `DeployFallbackTime`の保険が実機でどうしても発火しない場合は仕様どおりなので問題なし。発火した場合はログの`dist`の値を見て`CURRENT_SPEC.md §9-8`の対応表に従う
 - Rojoでの同期(`rojo serve`)を継続し、Studio側のRojoプラグインが接続されていることを確認
+
+---
+
+# 敵システム Step 5-0 の実装(危険度昇格時の旧部隊撤退。2026-08-07)
+
+`STEP5_0_RETREAT_SPEC.md`(ユーザー提供の指示書)に基づいて実装。実装前に変更計画を報告し、
+承認を得てから着手した(指示書§0の手順どおり)。武器改修(Step4a〜4d)は前回までに完了済みで、
+今回はそれとは独立して★2以降の敵種別を追加する前の基盤整備のみを行った。
+
+---
+
+## 実装したもの
+
+### Config追加
+
+- `Config.lua` — `Config.Threat.Retreat = { Enabled = true, FadeTime = 0.6 }`を新設。`Enabled`は
+  `Config.Threat.Enabled`と同じ切り分け用スイッチ、`FadeTime`は撤退開始から完全に消えるまでの秒数
+
+### EnemyManager: 撤退処理の基盤
+
+- `TweenService`のservice取得を追加
+- `retiredSquads`(モジュール状態。`retiredSquads[squadId]=true`)を新設。撤退命令を受けたsquadIdからの
+  新規生成を防ぐ
+- `spawnEnemy()`: `systemDisabled`チェックの直後に`retiredSquads[squadId]`ガードを追加(戻り値`nil`)。
+  `DeploySquad`・`deployFromCar`のどちらの経路にも効く最終防衛線
+- `spawnEnemy()`: モデル生成時に`SquadId`/`Retreating`属性を追加(デバッグ・クライアント読み取り用。
+  サーバー側の部隊判定は既存の`enemy.squadId`のまま変更していない)
+- `DeploySquad()`の非同期生成ループに3箇所の撤退済みチェックを追加(`task.spawn`開始直後・各個体を
+  生成する直前・`task.wait`から戻った直後)。既存の`roundToken`チェックと同じ`if`文にまとめた
+- `EnemyManager.RetreatSquad(squadId)`を新設(公開API)。対象squadIdの生存中の敵を配列へ集めてから
+  (反復中に`enemies`を直接削除しない)、`alive=false`→`Retreating`/`Dead`属性→頭上マーカー・被弾
+  フラッシュ無効化→`CanQuery`/`CanCollide`を`false`→`Transparency`を`FadeTime`秒かけて`1`へTween→
+  `enemies`から除去、の順で処理。Destroy予約は1モデルにつき1本の`task.delay`のみ(パーツごとに
+  `Tween.Completed:Connect()`は作らない)。戻り値は撤退させた敵の数
+- `EnemyManager.Clear()`に`table.clear(retiredSquads)`を追加
+
+### ThreatManager: 昇格時の旧部隊撤退・再派遣予約の無効化
+
+- `respawnToken`(モジュール状態)を新設。`roundToken`とは役割が異なり、同じラウンド内で段階昇格が
+  起きたときに、昇格前に予約された再派遣(`task.delay(RespawnDelay, ...)`)だけを無効化する
+- `cancelPendingRespawn()`(`respawnToken += 1; waitingRespawn = false`)を新設し、`promote()`の先頭・
+  `Start()`・`Stop()`・`Clear()`から呼ぶ
+- `promote(n)`: `currentSquadId`を上書きする前に`previousSquadId`として保存し、新段階へ切り替えた後、
+  `previousSquadId`が存在し`Config.Threat.Retreat.Enabled`が真のときだけ`RetreatSquad(previousSquadId)`
+  を呼ぶ。★0からの初回昇格(`previousSquadId==nil`)では呼ばない。段階番号を直接判定する分岐は追加していない
+- 再派遣予約の`task.delay`コールバックに、発火時点で確認する条件を追加(`roundToken`・`respawnToken`・
+  `running`・`currentSquadId`・`stage`のすべてが予約時点と一致するかどうか)
+
+---
+
+## 暫定措置・妥協点
+
+- **`FadeTime = 0.6`のまま(実機での比較確認は未実施)**。指示書は`0.6`/`1.0`/`1.5`を実機で比較して
+  採用理由を記録するよう求めているが、この会話ではコード実装とドキュメント更新までが範囲であり、
+  Studioでのプレイテストはユーザー側の作業(§12参照)。ユーザーが実機確認後、採用値を変えた場合は
+  `Config.lua`と本ドキュメントの該当箇所を更新すること
+- **★2の本番編成は今回実装しない**(指示書の明示的なスコープ外)。確認には`SETUP.md` Phase 9に
+  記載した一時的な仮Stage 2を使う。この仮Stage 2・★1閾値の一時変更・`Retreat.Enabled=false`は
+  **コミットしていない**(`Config.lua`は本番値のまま)
+
+---
+
+## ハマった点と対処
+
+- **`CountAlive==0`の誤判定窓について、事前調査で「対策不要」と判断した**: `ThreatManager.promote()`
+  直後に同じ監視ループ内で`CountAlive(currentSquadId)==0`を判定する箇所があり、素朴に実装すると
+  「昇格直後は新部隊がまだ0体なので誤って全滅判定される」リスクがあった。実際には`EnemyManager.DeploySquad()`
+  が`task.spawn`で非同期化されているものの、Robloxの`task.spawn`は最初のyield(`task.wait`)まで
+  呼び出し元へ制御を返さず同期的に実行するため、`squadList`の合計数が1以上であれば`DeploySquad`の
+  呼び出しが返る時点で最初の1体は既に登録済みになる。この実行順を確認したうえで、追加の「派遣中フラグ」
+  等の状態は導入しなかった(現行の全Stage定義は合計1体以上のため成立する。将来合計0体の編成を
+  定義した場合はこの限りではないが、現行定義には存在しないためスコープ外とした)
+- **`CURRENT_SPEC.md` §8に、既に実装済みのはずの「バズーカの射程制限(Step4d)」が未実装として
+  残っていた**: 前回のStep4d実装時にこの1行を消し忘れたドキュメントの整合性バグ。今回の作業と
+  合わせて該当行を削除した(ユーザーの明示的な承認あり。Step5-0のコード変更範囲には含まれない)
+
+---
+
+## 次ステップへの申し送り
+
+- **実機確認はユーザー側の作業**: `SETUP.md` Phase 9のチェックリストに沿って、一時的な仮Stage 2で
+  撤退処理を確認する。確認後は一時設定(★1閾値・仮Stage 2・`Retreat.Enabled`)を必ず本番値へ戻すこと
+- **`FadeTime`の最終値**: 実機の見た目(「撤退した」ように見えるか、「すり抜け」の違和感が強くないか)
+  で`0.6`/`1.0`/`1.5`を比較し、採用値と理由を本ファイルへ追記すること
+- **次はStep 5(★2。ヘリ+増援)**: `Config.Threat.EnemyTypes.Helicopter`と★2の`Stage`エントリを追加し、
+  `Movement = "air"`の分岐を`EnemyManager`に実装する。`ThreatManager`は無変更の想定
+  (`THREAT_DESIGN_PROPOSAL.md`参照)
+- Step 5-0で追加した`RetreatSquad`・`retiredSquads`・`respawnToken`の仕組みは、★2・★3でも
+  そのまま使える設計にしてある(段階番号を直接判定する分岐を持たないため)
+
+---
+
+## ユーザー手作業
+
+- `SETUP.md` **Phase 9(危険度昇格時の旧部隊撤退)** のチェックリストをStudioで上から順に確認する
+- 確認には一時的な仮Stage 2の追加が必要(Phase 9冒頭に手順を記載)。**確認後は必ず一時設定を削除・
+  復元し、`git diff -- ReplicatedStorage/Config.lua`で本番値のみが残っていることを確認する**
+- 特に「撤退中の敵にバズーカ弾が衝突しない」「撤退開始後にパトカーが警官を追加で降ろさない」
+  「旧段階の再派遣待ち中に昇格しても旧予約が発火しない」は実機でしか確認できないため重点的に見る
+- `FadeTime`の見た目(0.6秒で十分か)を確認し、変更する場合は理由とともに本ファイルへ記録する
+- Rojoでの同期(`rojo serve`)を継続し、Studio側のRojoプラグインが接続されていることを確認

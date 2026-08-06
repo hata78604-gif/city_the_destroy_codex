@@ -252,6 +252,8 @@ StarterPlayer/StarterPlayerScripts
 | CheckInterval | 1 | 段階判定を行う間隔(秒) |
 | DebugLog | true | 段階到達時刻・湧き・撃破をサーバーログに出す |
 | CorpseDespawnTime | 6 | 撃破した敵の死体が消えるまでの秒数 |
+| Retreat.Enabled | true | falseで昇格時の旧部隊撤退を行わない(切り分け用。Step5-0) |
+| Retreat.FadeTime | 0.6 | 撤退開始から完全に消えるまでの秒数(Step5-0。§13-4参照) |
 | Damage.Invincible | 0 | 被弾後の無敵秒数(プレイヤーごと)。**2026-07-31 実機フィードバックで2.0→0に変更**。体力表示が無いゲームで無敵中の被弾を無視すると「当たっているのに減らないバグ」に見えるため。理論ドレインは警官4人で-1.8秒/秒、★3の兵士8人では-10秒/秒になる。★3(Step6)で無敵時間の復活か`MaxLossPerMinute`のどちらかの再検討が必要 |
 | Damage.DefaultTelegraph | 0 | 敵種別に`Telegraph`が無い場合の既定値(秒)。判定タイミングそのもの |
 | Damage.BeamDuration | 0.2 | 赤い予告ビームが画面に残る秒数。判定とは無関係の見た目のみ |
@@ -462,7 +464,6 @@ GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 16+108 = 124
 - **警察ヘリ**(`Helicopter`。Step 5)
 - **戦車**(`Tank`。Step 6。建物破壊・`bonusPolicy="deny"`・貢献度クレジット方式もここで実装)
 - **★2・★3の`Config.Threat.Stages`エントリ**(未実装の敵種別を参照するため、実装が揃うまで登録しない)
-- **バズーカの射程制限(Step4d)**(`THREAT_DESIGN_PROPOSAL.md` Step 4。武器改修。連鎖ボーナスと設置距離制限はStep4a/4b、絨毯爆撃はStep4cで実装済み)
 - **`DestructionManager.Init`への`hudRemote`配線**(Step 6で戦車のボーナス奪取通知に使用)
 - **敵の`Movement`種別**: `"direct"`(直進。警官)・`"road"`(道路網走行。Step3のパトカーで実装済み)は実装済み。`"air"`(Step 5のヘリ用)は未実装
 - **レーダー(ミニマップ)**: 実装しない方針(頭上マーカー+画面端の方向インジケータの2本立てで代替)
@@ -740,3 +741,118 @@ Step4dでバズーカが0.3秒間隔の連射になっても1発ごとに必ず�
 `WeaponServer.LogScoreBreakdown`は`warn`を1行出す。新しい加点箇所を追加した際に`category`を
 渡し忘れると気づけるようにするための整合チェックであり、`"other"`バケットの可視化だけでは
 拾えない(拾い漏れではなく引数自体を渡していないケースを検出する)。
+
+---
+
+## 13. Step 5-0 の設計判断
+
+危険度昇格時に前段階の敵部隊をその場で行動停止させ、`Config.Threat.Retreat.FadeTime`秒で
+フェードアウトさせる「撤退」処理を導入した(`ThreatManager.promote()` / `EnemyManager.RetreatSquad()`)。
+敵種別・編成そのものは今回変更していない(★2・★3はまだ`Config.Threat.Stages`に登録されない)。
+
+### 13-1. `ThreatManager`は昇格時に旧`currentSquadId`を撤退させる
+
+`promote(n)`は`currentSquadId`を新しい値へ上書きする**前**に、上書き前の値を`previousSquadId`として
+保存する。新段階への昇格処理(HUD通知・演出・新部隊派遣)を行ったうえで、`previousSquadId`が
+存在し(★0からの初回昇格ではない)、かつ`Config.Threat.Retreat.Enabled`が真のときだけ、
+`EnemyManager.RetreatSquad(previousSquadId)`を呼ぶ。段階番号を直接判定する`if n == 2 then`の
+ような分岐は持たない。★2・★3でも同じ仕組みがそのまま動く。
+
+### 13-2. `EnemyManager.RetreatSquad(squadId)`の責務
+
+指定した`squadId`に属し、まだ生存している敵を対象に、次を行う(戻り値は撤退させた敵の数)。
+
+1. `retiredSquads[squadId] = true`を最初に設定する(以降このsquadIdからの新規生成を防ぐ)
+2. `enemies`を反復しながら削除せず、対象を一度配列へ集めてから処理する(取りこぼし防止)
+3. 各敵について: `enemy.alive = false` → `Retreating`/`Dead`属性を`true`に → 頭上マーカーと
+   被弾フラッシュを無効化 → 全`BasePart`の`CanQuery`/`CanCollide`を`false`に → `Transparency`を
+   `FadeTime`秒かけて`1`へTween → `enemies`テーブルから除去 → `FadeTime`秒後に`Destroy()`を
+   1モデルにつき1本の`task.delay`で予約
+
+**撤退は撃破ではない。** `killEnemy()`は呼ばない。スコア・タイム・撃破数・撃破演出・撃破音・
+死体は一切発生しない。
+
+### 13-3. 撤退時は即座に非攻撃・非ターゲット化する
+
+`enemy.alive = false`を撤退処理の最初に設定するため、既に予約済みのテレグラフ攻撃
+(`task.delay(tg, function() resolveAttack(...) end)`)も、既存の`resolveAttack`内の
+`if not enemy.alive or not aggressive then return end`チェックでそのまま無効になる。
+この既存チェックへの変更は無い。パトカーも`enemies`テーブルから除去されるため、共有Heartbeat
+ループ(`checkDeploy`経由の降車判定を含む)の対象外になり、撤退開始後は警官を追加で降ろさない。
+撤退前に既に降ろされていた警官は親パトカーと同じ`squadId`を持つため、同じ`RetreatSquad()`呼び出しで
+まとめて撤退する。
+
+### 13-4. 撤退した敵は`Config.Threat.Retreat.FadeTime`秒で消える
+
+初期値は`0.6`秒。撤退開始と同時に`CanQuery = false`になるため、フェード中の敵にバズーカを
+撃つと弾はすり抜ける(意図した挙動)。長くするほど「見えているのに当たらない」違和感が増し、
+短くするほど「突然消えた」ように見える。実機での採用値と理由は`PROGRESS.md`に記録する。
+
+### 13-5. 撤退済み部隊からの遅延スポーンを防止する
+
+`retiredSquads[squadId]`という集合を`EnemyManager`のモジュール状態として持つ。判定箇所は2つ:
+
+- `spawnEnemy(typeName, position, squadId)`の冒頭(`systemDisabled`チェックの直後)。
+  `DeploySquad`・`deployFromCar`のどちらの経路から呼ばれても、ここが最終防衛線になる
+- `EnemyManager.DeploySquad()`の非同期生成ループ内3箇所(`task.spawn`開始直後・各個体を
+  生成する直前・`task.wait`から戻った直後)。派遣の途中で昇格しても、残りの旧部隊を
+  生成しなくなる
+
+`retiredSquads`は`EnemyManager.Clear()`で`table.clear()`される。ラウンド境界で`squadId`が
+1から再利用されるため、これを消し忘れると次ラウンドの新しい部隊が誤って撤退済み扱いになり、
+一体も湧かなくなる。
+
+### 13-6. 再派遣予約は段階昇格でも無効化される
+
+`ThreatManager`に`roundToken`とは別の`respawnToken`を新設した。役割の違い:
+
+| トークン | 無効化するもの |
+|---|---|
+| `roundToken` | ラウンドをまたぐ非同期処理(既存。変更なし) |
+| `respawnToken` | 同じラウンド内で、段階変更前に予約された再派遣(`task.delay(RespawnDelay, ...)`) |
+
+`cancelPendingRespawn()`(`respawnToken += 1; waitingRespawn = false`)を`promote()`の先頭・
+`Start()`・`Stop()`・`Clear()`で呼ぶ。再派遣の`task.delay`コールバックは、発火時に
+`roundToken`・`respawnToken`・`running`・`currentSquadId`・`stage`のすべてが予約時点と一致する
+場合のみ実行する。**古いコールバックが無効化された場合、そのコールバック自身は`waitingRespawn`を
+書き戻さない**(昇格側の`cancelPendingRespawn()`が既に新しい状態へ更新しているため、古い
+コールバックが新しい状態を上書きしてはならない)。
+
+### 13-7. 昇格直後の`CountAlive==0`誤判定窓について
+
+`ThreatManager.monitorLoop()`は`promote()`の呼び出し直後、同じ反復内で
+`CountAlive(currentSquadId) == 0`を判定する。`EnemyManager.DeploySquad()`は`task.spawn`で
+非同期化されているが、**Robloxの`task.spawn`は最初のyield(`task.wait`)まで呼び出し元へ制御を
+返さず同期的に実行する**ため、`squadList`の合計数が1以上であれば、`DeploySquad`の呼び出しが
+返ってくる時点で最初の1体は既に`enemies`テーブルへ登録済みになる。したがって`promote()`直後の
+`CountAlive`判定が0を観測することはなく、誤って再派遣が予約されることもない。この性質は
+現行の全`Stage`定義(常に1体以上)で成立しており、追加の「派遣中フラグ」等の状態は導入していない。
+
+`RetreatSquad()`自体は`TweenService:Create`(yieldしない)と`task.delay`(スケジュールのみ)
+だけで構成されており、`promote()`内で他のコルーチンへ制御が渡ることはない。
+
+### 13-8. `Config.Threat.Retreat.Enabled = false`の場合
+
+`ThreatManager.promote()`側で`RetreatSquad()`の呼び出し自体を分岐でスキップする
+(`EnemyManager.RetreatSquad()`の内部で`Enabled`を見て早期returnする方式にはしていない)。
+理由は§12-1の`ChainAffectsX`と同じ方針: 呼び出し元で有効・無効を判断したほうが処理順を
+追いやすく、「撤退処理を呼んだが内部で無視された」のか「そもそも呼んでいない」のかをログで
+区別しやすい。`Enabled = false`のときは旧部隊の`squadId`・`enemies`登録がそのまま残るため、
+旧部隊は移動・攻撃を続けたまま新部隊が追加で派遣される。
+
+### 13-9. 画面端▲と頭上「!」を除外する条件
+
+画面端▲(`UIController.client.lua`の方向インジケータ)は、既存の
+`model:GetAttribute("Dead") ~= true`という条件のみで対象を絞っている。`RetreatSquad`は
+撤退開始時に`Dead`属性を`true`にするため、**この既存条件だけで撤退中の敵は自動的に除外される。**
+`UIController.client.lua`への変更は行っていない。`Retreating`属性はデバッグ・Explorerでの
+目視識別・将来のクライアント拡張用のメタデータとして持たせているだけで、現状どのクライアント
+コードからも読まれていない。
+
+頭上「!」は、サーバー側で既存の`enemy.marker.Enabled = false`(`killEnemy()`と同じ手法)を
+行うだけで消える。新しいRemoteEventは追加していない。
+
+### 13-10. `spawnEnemy()`が撤退済み部隊に対して`nil`を返すこと
+
+既存の呼び出し側2か所(`DeploySquad`内・`deployFromCar`内)はどちらも`spawnEnemy()`の戻り値を
+使用していないため、`nil`が返っても後続処理に影響しない。呼び出し側へのガード追加は行っていない。

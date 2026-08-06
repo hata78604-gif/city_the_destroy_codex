@@ -13,6 +13,7 @@
 
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Config = require(ReplicatedStorage:WaitForChild("Config"))
@@ -35,6 +36,10 @@ local spawnPoints = {} -- 道路交点の座標リスト(Init時に一度だけ�
 local systemDisabled = false -- roadLinesがnil/空だった場合にtrue(warn1回・以降no-op)
 local savedRoadLines = {} -- 道路中心線の配列(Init時に保存。Movement=="road"の経路計算に使う)
 local cityBounds = 0 -- 街の外周座標の絶対値。roadLines[#roadLines]から導出(下記Init参照)
+-- 撤退済み部隊の集合(Step5-0)。retiredSquads[squadId]=true。このsquadIdからの新規生成を
+-- spawnEnemy/DeploySquadの両方で防ぐ。Clear()でリセットしないと次ラウンドでsquadIdが
+-- 再利用されたときに誤って撤退済み扱いになる
+local retiredSquads = {}
 
 local THINK_INTERVAL = 0.2 -- 標的の再選択・攻撃判定を行う頻度(移動自体は毎フレーム)
 
@@ -193,6 +198,11 @@ local function spawnEnemy(typeName, position, squadId)
 	if systemDisabled then
 		return nil
 	end
+	-- 撤退済み部隊からの新規生成を防ぐ最終防衛線(Step5-0)。DeploySquad/deployFromCarの
+	-- どちらの経路から呼ばれても、ここで必ず止まる
+	if retiredSquads[squadId] then
+		return nil
+	end
 	local etype = Config.Threat.EnemyTypes[typeName]
 	if not etype then
 		warn(("[EnemyManager] 未知の敵タイプ '%s' が指定されました。無視します"):format(typeName))
@@ -244,6 +254,10 @@ local function spawnEnemy(typeName, position, squadId)
 	model.PrimaryPart = core
 	model:SetAttribute("EnemyType", typeName)
 	model:SetAttribute("Dead", false)
+	-- SquadId/Retreating(Step5-0)はデバッグとクライアント読み取り用の属性。
+	-- サーバー側の部隊判定本体はenemy.squadId(下のenemyテーブル)を使う
+	model:SetAttribute("SquadId", squadId)
+	model:SetAttribute("Retreating", false)
 	model.Parent = folder
 
 	-- 被弾フラッシュ用Highlight(手順7)。Hits>1の敵にのみ作る(1発で死ぬ敵は光る出番が無いため。
@@ -886,13 +900,20 @@ function EnemyManager.DeploySquad(squadId, squadList)
 	end
 	local token = roundToken
 	task.spawn(function()
+		-- 撤退済みチェック(Step5-0)。開始直後に1回。retiredSquads[squadId]は通常
+		-- ここではまだ立っていない(新規squadIdなので)が、多重防御として置く
+		if roundToken ~= token or retiredSquads[squadId] then
+			return
+		end
 		-- この1回の派遣に閉じた使用済み座標の集合(手順6)。road個体だけが書き込む
 		local usedPoints = {}
 		for _, entry in squadList do
 			local etype = Config.Threat.EnemyTypes[entry.type]
 			local isRoad = etype ~= nil and etype.Movement == "road"
 			for _ = 1, entry.count do
-				if roundToken ~= token then
+				-- 各個体を生成する直前の撤退済みチェック(Step5-0)。派遣途中で昇格すると
+				-- ここで止まり、旧squadIdの残り個体を生成しなくなる
+				if roundToken ~= token or retiredSquads[squadId] then
 					return
 				end
 				local point = pickSpawnPoint(usedPoints)
@@ -909,9 +930,75 @@ function EnemyManager.DeploySquad(squadId, squadList)
 				end
 				spawnEnemy(entry.type, point, squadId)
 				task.wait(Config.Threat.Spawn.Interval)
+				-- task.waitから戻った直後の撤退済みチェック(Step5-0)。待機中に昇格した場合に備える
+				if roundToken ~= token or retiredSquads[squadId] then
+					return
+				end
 			end
 		end
 	end)
+end
+
+--------------------------------------------------------------------
+-- 撤退処理(Step5-0)。危険度昇格時に前段階の部隊をその場で行動停止させ、フェードアウトさせる。
+-- 撤退は撃破ではない: killEnemy()は呼ばない。スコア・タイム・撃破数・撃破演出・死体は発生させない
+--------------------------------------------------------------------
+function EnemyManager.RetreatSquad(squadId)
+	if not squadId then
+		return 0
+	end
+	retiredSquads[squadId] = true -- 以降このsquadIdからの新規生成をspawnEnemy/DeploySquadで防ぐ
+
+	-- enemiesを反復しながら削除しない(取りこぼし防止)。対象を先に配列へ集めてから処理する
+	local toRetreat = {}
+	for model, enemy in enemies do
+		if enemy.squadId == squadId and enemy.alive then
+			table.insert(toRetreat, { model = model, enemy = enemy })
+		end
+	end
+
+	for _, entry in toRetreat do
+		local model, enemy = entry.model, entry.enemy
+
+		-- alive=falseはフェード開始前に設定する。これにより既に予約済みのテレグラフ攻撃も
+		-- resolveAttack()の既存enemy.aliveチェックで無効になる(§8-1)
+		enemy.alive = false
+		model:SetAttribute("Retreating", true)
+		model:SetAttribute("Dead", true) -- 画面端▲インジケータは既存のDead判定で自動的に除外される
+		if enemy.marker then
+			enemy.marker.Enabled = false -- 頭上「!」を即座に消す
+		end
+		if enemy.hitFlash then
+			enemy.hitFlash.Enabled = false
+		end
+
+		for _, part in model:GetChildren() do
+			if part:IsA("BasePart") then
+				part.CanQuery = false -- バズーカのレイキャストをすり抜けさせる
+				part.CanCollide = false
+				TweenService:Create(part,
+					TweenInfo.new(Config.Threat.Retreat.FadeTime, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
+					{ Transparency = 1 }):Play()
+			end
+		end
+
+		enemies[model] = nil -- 以降Heartbeatループ(updateEnemy)の対象外になる
+
+		-- Destroy予約は1モデルにつき1本だけ(パーツごとにCompleted:Connect()しない)。
+		-- ラウンド終了でClear()がfolderごと先に破棄している場合があるため、
+		-- 消滅済みモデルへ二重にDestroy()しないようmodel.Parentを確認する(§8-6)
+		task.delay(Config.Threat.Retreat.FadeTime, function()
+			if model.Parent then
+				model:Destroy()
+			end
+		end)
+	end
+
+	if Config.Threat.DebugLog then
+		print(("[EnemyManager] squad=%d 撤退開始 (対象=%d体)"):format(squadId, #toRetreat))
+	end
+
+	return #toRetreat
 end
 
 function EnemyManager.CountAlive(squadId)
@@ -948,6 +1035,7 @@ function EnemyManager.Clear()
 	table.clear(enemies)
 	table.clear(playerState)
 	table.clear(killCounts) -- RESULTでGetKillCounts()を読み終えた後のLOBBYで呼ばれるので、順序は問題ない
+	table.clear(retiredSquads) -- 次ラウンドでsquadIdが1から再利用されるため必須(Step5-0)
 	if folder then
 		folder:Destroy()
 		folder = nil

@@ -976,6 +976,21 @@ Config.RemoteNames = {
 - 4c: 予告矩形が出る → 3機が飛来 → 爆発が線上を走っていく → 20秒クールダウン。**タブレットでfps測定**
 - ★1到達時刻を再測定する。連鎖ボーナスと絨毯爆撃でスコアの伸び方が変わるため、Step 2〜3 で測った到達時刻は無効になる。`Config.Threat.Stages` の閾値(1000/4000/10000点)を、この再測定値をもとに見直す
 
+### Step 5-0: 危険度昇格時の旧部隊撤退
+
+★2以降を追加すると前段階の部隊が累積し続ける(パトカーが降車を続ける・前段階の敵が攻撃してくる・
+再派遣が遅れて発火する等)。★2本体(ヘリ)より先に、**部隊単位で撤退させる基盤だけ**を入れる。
+
+- `EnemyManager.RetreatSquad(squadId)`: 対象部隊をその場で行動停止させ、`Config.Threat.Retreat.FadeTime`秒
+  でフェードアウトさせる(killEnemy()は使わない。撤退は撃破ではない)
+- `ThreatManager.promote(n)`: 昇格時に上書き前の`currentSquadId`を撤退させる
+- `DeploySquad`生成途中の旧部隊スポーン・段階変更前に予約された再派遣の`task.delay`を、どちらも無効化する
+- `Config.Threat.Retreat.Enabled`で機能全体を切り分け可能にする
+
+**動作確認**: ★1部隊が存在する状態で次段階へ昇格すると、旧部隊が即座に停止しフェードアウトする。
+撤退中の敵から攻撃されない・撤退中の敵にバズーカ弾が衝突しない・撤退でスコアやタイムが増えない。
+詳細は`STEP5-0`の実装記録(`PROGRESS.md`)と`CURRENT_SPEC.md` §13を参照。
+
 ### Step 5: ★2(ヘリ + 増援)
 
 Config に `Helicopter` と★2の Stage を足し、`Movement = "air"` の分岐(高度固定 + 周回)を EnemyManager に追加する。**ThreatManager は無変更**(データ駆動が効いていることの検証になる)。

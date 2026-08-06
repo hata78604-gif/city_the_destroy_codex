@@ -22,21 +22,35 @@ local squadSeq = 0
 local currentSquadId = nil
 local waitingRespawn = false
 local roundToken = 0 -- Clear()のたびに+1。task.delay(RespawnDelay待機)の世代確認に使う
+-- 再派遣予約(RespawnDelay待機)だけを無効化する世代トークン(Step5-0)。roundTokenと役割が違う:
+-- roundTokenはラウンドをまたぐ非同期処理を無効化し、respawnTokenは同じラウンド内で
+-- 段階昇格が起きたときに、昇格前に予約された再派遣を無効化する
+local respawnToken = 0
 local roundStartClock = 0 -- 到達秒数のログ用
 
 function ThreatManager.Init(dependencies)
 	deps = dependencies
 end
 
+-- 保留中の再派遣予約を無効化する(Step5-0)。段階昇格時・Start/Stop/Clearで呼ぶ。
+-- ここでwaitingRespawnをfalseに戻すのはこの関数のみ: 古い再派遣コールバック自身は
+-- 自分がキャンセルされたときにwaitingRespawnを書き戻さない(新しい状態を上書きしないため)
+local function cancelPendingRespawn()
+	respawnToken += 1
+	waitingRespawn = false
+end
+
 --------------------------------------------------------------------
 -- 昇格
 --------------------------------------------------------------------
 local function promote(n)
+	local previousSquadId = currentSquadId -- 上書き前に保存(Step5-0: 撤退させる対象)
+	cancelPendingRespawn() -- 旧段階の再派遣予約(あれば)を無効化
+
 	local def = Config.Threat.Stages[n]
 	stage = n
 	squadSeq += 1
 	currentSquadId = squadSeq
-	waitingRespawn = false
 
 	deps.hudRemote:FireAllClients("threat", {
 		stage = n,
@@ -49,6 +63,16 @@ local function promote(n)
 	if Config.Threat.DebugLog then
 		print(("[ThreatManager] %s に到達 (開始から %.1f 秒 / スコア %d)")
 			:format(def.Name, os.clock() - roundStartClock, deps.getScore()))
+	end
+
+	-- ★0からの初回昇格はpreviousSquadId==nilなので撤退処理を呼ばない。
+	-- Retreat.Enabled=falseのときは呼ばず、旧部隊を残したまま新部隊を派遣する(切り分け用)
+	if previousSquadId then
+		if Config.Threat.Retreat.Enabled then
+			deps.enemies.RetreatSquad(previousSquadId)
+		elseif Config.Threat.DebugLog then
+			print("[ThreatManager] Retreat.Enabled=false のため旧部隊を残します")
+		end
 	end
 
 	deps.enemies.DeploySquad(currentSquadId, def.Squad)
@@ -74,11 +98,21 @@ local function monitorLoop()
 				-- 二重派遣防止ガード。CheckIntervalが1秒なので、これが無いと
 				-- 「生存者0」を毎秒検出してRespawnDelay秒の間に何度も派遣されてしまう
 				waitingRespawn = true
+				-- 予約時点のsquadId・段階を捕捉する(Step5-0)。コールバック発火時に
+				-- これらが変わっていたら、待機中に昇格したと分かり再派遣しない
+				local watchedSquadId = currentSquadId
+				local watchedStage = stage
 				local respawnDelay = stages[stage].RespawnDelay
-				local myToken = roundToken
+				respawnToken += 1
+				local myRespawnToken = respawnToken
+				local myRoundToken = roundToken
 				task.delay(respawnDelay, function()
-					if roundToken ~= myToken or not running then
-						return -- 待機中にラウンドが終わっていたら派遣しない
+					if roundToken ~= myRoundToken
+						or respawnToken ~= myRespawnToken
+						or not running
+						or currentSquadId ~= watchedSquadId
+						or stage ~= watchedStage then
+						return -- ラウンド終了・段階昇格・二重予約のいずれかで無効化された
 					end
 					waitingRespawn = false
 					squadSeq += 1
@@ -98,7 +132,7 @@ function ThreatManager.Start()
 	stage = 0
 	squadSeq = 0
 	currentSquadId = nil
-	waitingRespawn = false
+	cancelPendingRespawn()
 	running = true
 	roundStartClock = os.clock()
 	deps.enemies.SetAggressive(true) -- Stop()の逆(移動・攻撃を許可)。忘れると敵が永久に動かない
@@ -116,6 +150,7 @@ end
 
 function ThreatManager.Stop()
 	running = false
+	cancelPendingRespawn()
 	deps.enemies.SetAggressive(false)
 end
 
@@ -125,7 +160,7 @@ function ThreatManager.Clear()
 	stage = 0
 	squadSeq = 0
 	currentSquadId = nil
-	waitingRespawn = false
+	cancelPendingRespawn()
 end
 
 return ThreatManager

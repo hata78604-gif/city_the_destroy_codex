@@ -17,7 +17,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage:WaitForChild("Config"))
 
 local WeaponServer = {}
-local rng = Random.new()
 
 -- クールダウン暗転を表示する最小秒数。これ未満の武器(バズーカの0.3秒)は、表示すると
 -- 武器スロットが毎秒3回チカチカして目障りになるだけなので送らない。実機で振る値ではなく

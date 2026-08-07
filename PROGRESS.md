@@ -388,3 +388,43 @@ Step 0(基盤整備)→ Step 1(タイム経済の可視化)→ Step 2(★1警官
   「旧段階の再派遣待ち中に昇格しても旧予約が発火しない」は実機でしか確認できないため重点的に見る
 - `FadeTime`の見た目(0.6秒で十分か)を確認し、変更する場合は理由とともに本ファイルへ記録する
 - Rojoでの同期(`rojo serve`)を継続し、Studio側のRojoプラグインが接続されていることを確認
+
+---
+
+# Luau 静的チェックの導入(2026-08-07)
+
+## 実装したもの
+
+- `lint.bat`(新規) — プロジェクト直下に追加。`rojo sourcemap`でsourcemap.jsonを再生成した後、
+  `luau-lsp analyze`で`ServerScriptService`/`ReplicatedStorage`/`StarterPlayer`を検査し、
+  結果を`lint.txt`に出力してコンソールにも表示する
+- 既存3件の警告を等価変換で解消(ゲーム挙動は変更なし)
+  - `ServerScriptService/Modules/NPCManager.lua`315行目付近 — `table.remove`の戻り値(`any?`)を
+    ローカル変数に受けてから`nil`チェックして`:Destroy()`するよう変更
+  - `ServerScriptService/Modules/EnemyManager.lua`788行目付近 — 同様のパターン(NPCManagerの
+    手法をコピーした撃破時ラグドール化処理)に同じ修正を適用
+  - `ServerScriptService/Modules/WeaponServer.lua`20行目 — 未使用の`local rng = Random.new()`宣言を削除
+- `.gitignore`に`lint.txt`を追記(`sourcemap.json`は既存)。`globalTypes.d.luau`はGit管理下のまま維持
+
+## ハマった点と対処
+
+- **`luau-lsp`が日本語パス(`...\ロブロックス破壊ゲーム`)を解決できず`path does not exist`になる**:
+  `C:\rbxgame`というASCIIのみのジャンクション(`mklink /J`)を作成し、`luau-lsp`の実行だけはこちら
+  経由で行う運用にした。ファイル編集・Rojo・Gitは引き続き元の日本語パスで行う
+- **PowerShellやGit Bashから`cd`して直接`luau-lsp`を呼ぶと、ジャンクション先の実パス(日本語)に
+  解決されてしまい同じエラーが再発した**: `cmd.exe`経由(`cmd /c "chcp 932 > nul && cd /d C:\rbxgame && ..."`)
+  で実行する必要があった。`lint.bat`はダブルクリック実行される前提のためこの形で問題ない
+- **PowerShellが標準エラー出力をすべてエラー扱いする件**: `luau-lsp`はINFO/WARNも標準エラー出力に
+  書き込むため、`2>&1`でリダイレクトして`lint.txt`にまとめて出力する形にした
+
+## ユーザー手作業
+
+- 環境変数`Path`への`C:\tools`追加、ジャンクション作成(`mklink /J C:\rbxgame "<プロジェクトの実パス>"`)は
+  セットアップ済み。**PCを変えた場合はこの2つの再実行が必要**
+- `lint.bat`はダブルクリックで実行する(`pause`があるため`cmd`以外から自動実行すると停止する)
+
+## 次ステップへの申し送り
+
+- 以降の実装作業では、完了報告の前に`lint.bat`を実行し、既存の警告との差分を報告に含めること
+- `StarterPlayer/StarterPlayerScripts/EffectsClient.client.lua`15行目に`LocalUnused: Variable 'Players' is never used`
+  という新規警告が見つかっている(今回のスコープ外のため未修正)。実害はなく、単純な未使用importと見られる

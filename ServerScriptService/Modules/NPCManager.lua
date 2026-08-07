@@ -312,7 +312,10 @@ local function killNpc(npc, blastPos, attacker, scoreScale)
 	end
 	for _ = 1, rng:NextInteger(2, 3) do
 		if #welds > 0 then
-			table.remove(welds, rng:NextInteger(1, #welds)):Destroy()
+			local w = table.remove(welds, rng:NextInteger(1, #welds))
+			if w then
+				w:Destroy()
+			end
 		end
 	end
 

@@ -41,6 +41,14 @@ local cityBounds = 0 -- 街の外周座標の絶対値。roadLines[#roadLines]�
 -- 再利用されたときに誤って撤退済み扱いになる
 local retiredSquads = {}
 
+-- ヘリ輸送(Step5-1)。squadId=>まだ地上にいないが派遣中の数。CountAliveに加算することで
+-- 「ヘリ飛行中は生存0体」の誤判定(全滅済みと誤認されて余分な再派遣が起きる)を防ぐ
+local pendingDeployments = {}
+-- 飛行中のヘリを追跡する。activeTransports[model] = { squadId, cancelled }。
+-- RetreatSquad/Clearから中断できるようにするための機構のみで、ヘリ自体はenemiesに入れない
+local activeTransports = {}
+local transportFolder = nil -- workspace.EnemyTransports(初回ヘリ生成時に遅延生成)
+
 local THINK_INTERVAL = 0.2 -- 標的の再選択・攻撃判定を行う頻度(移動自体は毎フレーム)
 
 --------------------------------------------------------------------
@@ -192,9 +200,11 @@ local function buildCarBody(model, rootCf, etype)
 	return core, cabin
 end
 
--- 個体生成の単一入口。警官の生成経路はここだけにする(Step3のパトカー降車もこれを通す)。
--- squadIdの付け忘れが構造的に起きないようにするため
-local function spawnEnemy(typeName, position, squadId)
+-- 個体生成の単一入口。警官の生成経路はここだけにする(Step3のパトカー降車、Step5-1のヘリ降下もこれを通す)。
+-- squadIdの付け忘れが構造的に起きないようにするため。
+-- options(任意。Step5-1で追加): { deploying=true, deployFromY=number, suppressSpawnEffect=true }。
+-- 省略時(第4引数なし)は既存呼び出しと完全に同じ挙動を維持する
+local function spawnEnemy(typeName, position, squadId, options)
 	if systemDisabled then
 		return nil
 	end
@@ -297,13 +307,35 @@ local function spawnEnemy(typeName, position, squadId)
 		spawnedAt = os.clock(),
 		tripsUsed = 0,
 		lastDeployAt = nil,
+		-- ヘリ降下(Step5-1)用。非対象タイプでは無害にfalseのまま
+		deploying = false,
+		bursting = false,
 	}
+
+	-- ヘリ降下中の個体(Step5-1)。移動・標的選択・攻撃・被弾・頭上「!」をすべて無効化してから登録する
+	if options and options.deploying then
+		enemy.deploying = true
+		local startY = options.deployFromY or y
+		model:PivotTo(CFrame.new(position.X, startY, position.Z))
+		model:SetAttribute("Deploying", true)
+		for _, part in model:GetChildren() do
+			if part:IsA("BasePart") then
+				part.CanQuery = false
+			end
+		end
+		marker.Enabled = false
+	end
+
 	enemies[model] = enemy
 
 	if Config.Threat.DebugLog then
 		print(("[EnemyManager] %s が湧きました (squad=%d)"):format(etype.DisplayName, squadId))
 	end
-	deps.effectRemote:FireAllClients("enemySpawn", { position = Vector3.new(position.X, y, position.Z) })
+	-- ヘリ降下中は着地演出(updateDeployingEnemy)側で1回だけ出す。ここで出すと
+	-- 空中降下中なのに地上で湧き煙が先に出てしまうため(Step5-1)
+	if not (options and options.suppressSpawnEffect) then
+		deps.effectRemote:FireAllClients("enemySpawn", { position = Vector3.new(position.X, y, position.Z) })
+	end
 
 	return enemy
 end
@@ -327,17 +359,22 @@ local function pickTarget(enemy)
 	return best
 end
 
--- 敵Head→標的HumanoidRootPartの直線上に workspace.Map が挟まっていれば true
-local function isBlocked(fromPos, toPos)
+-- fromPos→toPosの直線上に workspace.Map が挟まっていればRaycastResultを返す(無ければnil)。
+-- isBlocked(警官の既存LOS判定)とresolveBurstShot(兵士の曳光弾終点)の両方がこれを使う
+local function raycastMap(fromPos, toPos)
 	local map = workspace:FindFirstChild("Map")
 	if not map then
-		return false
+		return nil
 	end
 	local params = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Include
 	params.FilterDescendantsInstances = { map }
-	local result = workspace:Raycast(fromPos, toPos - fromPos, params)
-	return result ~= nil
+	return workspace:Raycast(fromPos, toPos - fromPos, params)
+end
+
+-- 敵Head→標的HumanoidRootPartの直線上に workspace.Map が挟まっていれば true
+local function isBlocked(fromPos, toPos)
+	return raycastMap(fromPos, toPos) ~= nil
 end
 
 local function damagePlayer(player, penalty, hitPos)
@@ -420,6 +457,88 @@ local function fireAttack(enemy, targetPlayer, targetRoot)
 	end
 end
 
+--------------------------------------------------------------------
+-- 兵士の5連射(Step5-1)。AttackType=="burst"の敵専用。既存fireAttack/resolveAttack
+-- (警官のshoot)には一切触れない
+--------------------------------------------------------------------
+
+-- 1発ぶんの判定。テレグラフは持たない(発射=即判定)。命中/はずれいずれも曳光弾(enemyTracer)を
+-- 出す。赤いenemyAimは使わない(§19)。戻り値: 命中したか, 命中位置(命中時のみ)
+local function resolveBurstShot(enemy, targetPlayer)
+	local etype = enemy.etype
+	local fromPos = enemy.markerAnchor.Position
+	local char = targetPlayer.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then
+		return false, nil
+	end
+
+	local flatOffset = Vector3.new(
+		root.Position.X - enemy.core.Position.X, 0, root.Position.Z - enemy.core.Position.Z)
+	local d = flatOffset.Magnitude
+	local maxRange = etype.AttackRange * Config.Threat.Damage.RangeGrace
+	if d > maxRange then
+		deps.effectRemote:FireAllClients("enemyTracer", { from = fromPos, to = root.Position })
+		return false, nil
+	end
+
+	if Config.Threat.Damage.RequireLineOfSight then
+		local hitResult = raycastMap(fromPos, root.Position)
+		if hitResult then
+			-- 遮蔽物で止まった曳光弾の終点はRaycastの着弾点にする(建物を貫通して見えるのを防ぐ。§21)
+			deps.effectRemote:FireAllClients("enemyTracer", { from = fromPos, to = hitResult.Position })
+			return false, nil
+		end
+	end
+
+	deps.effectRemote:FireAllClients("enemyTracer", { from = fromPos, to = root.Position })
+	return true, root.Position
+end
+
+-- バースト全体の制御。5発をBurstInterval間隔で撃ち、命中数をまとめて1回だけタイムに反映する(§22)。
+-- enemy.burstingで多重起動を防ぐ(同じ敵が同時に複数バーストを開始しない。§17)
+local function fireBurst(enemy, targetPlayer)
+	if enemy.bursting then
+		return
+	end
+	enemy.bursting = true
+	local etype = enemy.etype
+	local token = roundToken
+
+	task.spawn(function()
+		local hitCount = 0
+		local lastHitPos = nil
+
+		for shot = 1, etype.BurstCount do
+			-- 各弾の発射直前に中断条件を確認する(§23): ラウンド終了・撤退中(非aggressive)・
+			-- この敵自身の撃破・対象プレイヤーの退出のいずれかで残弾を撃たない
+			if roundToken ~= token or not enemy.alive or not aggressive or not targetPlayer.Parent then
+				break
+			end
+			local hit, hitPos = resolveBurstShot(enemy, targetPlayer)
+			if hit then
+				hitCount += 1
+				lastHitPos = hitPos
+			end
+			if shot < etype.BurstCount then
+				task.wait(etype.BurstInterval)
+			end
+		end
+
+		enemy.bursting = false
+
+		if roundToken ~= token or hitCount <= 0 then
+			return
+		end
+		-- Retreating中に撃破・撤退が挟まった場合は蓄積ダメージを丸ごと破棄する(§23)。
+		-- Step5-0の「撤退後は旧部隊からダメージを受けない」を優先するため
+		if enemy.model and enemy.model:GetAttribute("Retreating") then
+			return
+		end
+		damagePlayer(targetPlayer, hitCount * etype.TimePenalty, lastHitPos)
+	end)
+end
+
 -- Movement=="direct"(直進)の敵の移動・攻撃。既存ロジックは無変更(リネームのみ)
 local function updateDirectEnemy(enemy, dt)
 	local now = os.clock()
@@ -451,8 +570,43 @@ local function updateDirectEnemy(enemy, dt)
 	end
 
 	if now >= enemy.nextAttack and d <= etype.AttackRange then
+		-- nextAttackはここ(攻撃"開始"時点)で次回分を積む。兵士のバーストも同じ意味を維持する:
+		-- AttackInterval=3.0は「バースト開始から次のバースト開始まで」であり、
+		-- バースト終了後にさらに3秒待つ実装にはしない(5連射 約0.48秒 + 休止 約2.5秒になる)
 		enemy.nextAttack = now + etype.AttackInterval
-		fireAttack(enemy, target, root)
+		if etype.AttackType == "burst" then
+			fireBurst(enemy, target)
+		else
+			fireAttack(enemy, target, root)
+		end
+	end
+end
+
+-- ヘリ降下中(Step5-1)の垂直降下のみを行う。移動・標的選択・攻撃は一切行わない
+local function updateDeployingEnemy(enemy, dt)
+	local cfg = Config.Threat.HelicopterTransport
+	local pos = enemy.core.Position
+	local targetY = enemy.spawnY -- 最終接地Y(etype.SpawnY)。updateDirectEnemyと同じ値を使う
+	local newY = pos.Y - cfg.DescendSpeed * dt
+
+	if newY <= targetY then
+		enemy.model:PivotTo(CFrame.new(pos.X, targetY, pos.Z))
+		enemy.deploying = false
+		enemy.model:SetAttribute("Deploying", false)
+		for _, part in enemy.model:GetChildren() do
+			if part:IsA("BasePart") then
+				part.CanQuery = true
+			end
+		end
+		if enemy.marker then
+			enemy.marker.Enabled = Config.Threat.Marker.Enabled
+		end
+		-- 着地直後の一斉射撃を防ぐ(§15)
+		enemy.nextAttack = os.clock() + cfg.LandingAttackGrace
+		-- 着地演出はここで初めて出す(spawnEnemy側では抑制済み。§5の指示)
+		deps.effectRemote:FireAllClients("enemySpawn", { position = enemy.core.Position })
+	else
+		enemy.model:PivotTo(CFrame.new(pos.X, newY, pos.Z))
 	end
 end
 
@@ -748,7 +902,9 @@ local function updateRoadEnemy(enemy, dt)
 end
 
 local function updateEnemy(enemy, dt)
-	if enemy.etype.Movement == "road" then
+	if enemy.deploying then
+		updateDeployingEnemy(enemy, dt)
+	elseif enemy.etype.Movement == "road" then
 		updateRoadEnemy(enemy, dt)
 	else
 		updateDirectEnemy(enemy, dt)
@@ -852,7 +1008,9 @@ end
 function EnemyManager.OnExplosion(ctx)
 	local now = os.clock()
 	for model, enemy in enemies do
-		if enemy.alive then
+		-- 降下中(Step5-1)は爆風の巻き添えも受けない。CanQuery=falseは直撃レイキャストしか
+		-- 防げない(爆風は距離判定のみでCanQueryを見ない)ため、ここでも明示的に除外する
+		if enemy.alive and not enemy.deploying then
 			-- coreの1点判定のみ(車体半長6 < バズーカ半径12なので、パトカーでも実用上問題ない)
 			local dist = (enemy.core.Position - ctx.position).Magnitude
 			if dist <= ctx.radius + 2 then -- マージン2はNPCManager.killNpcの既存値に揃える
@@ -896,7 +1054,179 @@ function EnemyManager.Init(dependencies)
 	spawnPoints = computeSpawnPoints(roadLines)
 end
 
--- squadList = Stage.Squad の配列({ {type=..., count=...}, ... })
+--------------------------------------------------------------------
+-- 軍用ヘリ輸送(Step5-1)。戦闘する敵ではなく兵士投入の演出専用オブジェクト。
+-- Config.Threat.EnemyTypesへは登録せず、workspace.EnemyTransports(=transportFolder)に
+-- 生成する。これによりCountAlive/画面端▲/頭上「!」/爆風判定/killCounts/スコアの
+-- いずれの対象にもならない(それぞれworkspace.Enemies/enemiesテーブルしか見ないため)
+--------------------------------------------------------------------
+local HELI_OLIVE = Color3.fromRGB(70, 83, 58)
+local HELI_DARKGRAY = Color3.fromRGB(50, 52, 55)
+
+local function makeHeliPart(size, cf, parent, name, color, material)
+	local p = Instance.new("Part")
+	p.Name = name
+	p.Size = size
+	p.CFrame = cf
+	p.Color = color
+	p.Material = material or Enum.Material.SmoothPlastic
+	p.Anchored = true
+	p.CanCollide = false
+	p.CanQuery = false -- ヘリは撃破対象ではないため常にfalse(バズーカのレイキャストが素通りする)
+	p.CastShadow = false
+	p.Parent = parent
+	return p
+end
+
+-- ブロック状の簡易軍用ヘリ。原点でパーツを組み、最後にcfへPivotToで一括移動する
+-- (胴体・コックピット・テールブーム・尾翼・メインローター2本・ローターハブ。静止した十字ローターでよい。§8)
+local function buildHelicopterModel(cf)
+	if not transportFolder then
+		transportFolder = Instance.new("Folder")
+		transportFolder.Name = "EnemyTransports"
+		transportFolder.Parent = workspace
+	end
+
+	local model = Instance.new("Model")
+	model.Name = "MilitaryHelicopter"
+
+	local body = makeHeliPart(Vector3.new(6, 5, 16), CFrame.new(0, 0, 0), model, "Body", HELI_OLIVE)
+	makeHeliPart(Vector3.new(5, 3.4, 5), CFrame.new(0, 1.2, -6.5), model, "Cockpit", HELI_DARKGRAY, Enum.Material.Glass)
+	makeHeliPart(Vector3.new(1.6, 1.6, 12), CFrame.new(0, 0.5, 12), model, "TailBoom", HELI_OLIVE)
+	makeHeliPart(Vector3.new(1, 5, 0.6), CFrame.new(0, 2.5, 17.5), model, "TailFin", HELI_DARKGRAY)
+	makeHeliPart(Vector3.new(1, 0.6, 1), CFrame.new(0, 3, 0), model, "RotorHub", HELI_DARKGRAY)
+	makeHeliPart(Vector3.new(26, 0.2, 1), CFrame.new(0, 3.3, 0), model, "RotorA", HELI_DARKGRAY)
+	makeHeliPart(Vector3.new(1, 0.2, 26), CFrame.new(0, 3.3, 0), model, "RotorB", HELI_DARKGRAY)
+
+	model.PrimaryPart = body
+	model:PivotTo(cf)
+	model.Parent = transportFolder
+	return model
+end
+
+-- fromPos→toPosへ直線飛行させる(毎フレームPivotTo。TweenServiceはModelのCFrameを
+-- 直接扱えないため既存の敵移動と同じ手動補間方式を使う)。
+-- transport.cancelled/roundTokenは各yield(Heartbeat:Wait())から戻った直後、
+-- モデルに触れる前に必ず確認する(破棄済みモデルへ誤って触れないため)。
+-- 戻り値: 最後まで飛行できたか(false=中断)
+local function heliFlyTo(model, transport, fromPos, toPos, speed, token)
+	local diff = toPos - fromPos
+	local dist = diff.Magnitude
+	if dist < 0.01 then
+		return true
+	end
+	local dir = diff.Unit
+	local pos = fromPos
+	model:PivotTo(CFrame.lookAt(pos, pos + dir))
+
+	while true do
+		local dt = RunService.Heartbeat:Wait()
+		if transport.cancelled or roundToken ~= token or not model.Parent then
+			return false
+		end
+		local remaining = (toPos - pos).Magnitude
+		local step = speed * dt
+		if step >= remaining then
+			pos = toPos
+			model:PivotTo(CFrame.lookAt(pos, pos + dir))
+			return true
+		end
+		pos = pos + dir * step
+		model:PivotTo(CFrame.lookAt(pos, pos + dir))
+	end
+end
+
+-- centerからspread以内でランダムにずらした地点を返す(Y座標はcenterのまま。spawnEnemy側で上書きされる)
+local function jitterPoint(center, spread)
+	local ang = rng:NextNumber(0, math.pi * 2)
+	local r = spread * rng:NextNumber(0, 1.0)
+	return Vector3.new(center.X + math.cos(ang) * r, center.Y, center.Z + math.sin(ang) * r)
+end
+
+-- ヘリ輸送1回ぶんの処理本体。DeploySquadから直接呼ばれる(このsquadListにはヘリ以外の
+-- 同時エントリが無い前提だが、将来混在しても後続entryをブロックしない設計にはしていない。
+-- 現状の★2編成が単一entryのため許容する)
+local function deployByHelicopter(squadId, entry, token)
+	if roundToken ~= token or retiredSquads[squadId] then
+		return
+	end
+	local cfg = Config.Threat.HelicopterTransport
+
+	-- yieldする前に同期的にpendingを加算する(§10)。CountAlive誤判定の窓を作らないための要
+	pendingDeployments[squadId] = (pendingDeployments[squadId] or 0) + entry.count
+
+	local dropPoint = pickSpawnPoint(nil) -- 既存のMinDistanceFromPlayerルールをそのまま使う(§9-1)
+	local axisIsX = rng:NextNumber() < 0.5
+	local sign = if rng:NextNumber() < 0.5 then 1 else -1
+	local farDist = cityBounds + cfg.EntryMargin
+	local entryPos, exitPos
+	if axisIsX then
+		entryPos = Vector3.new(sign * farDist, cfg.Altitude, dropPoint.Z)
+		exitPos = Vector3.new(-sign * farDist, cfg.Altitude, dropPoint.Z)
+	else
+		entryPos = Vector3.new(dropPoint.X, cfg.Altitude, sign * farDist)
+		exitPos = Vector3.new(dropPoint.X, cfg.Altitude, -sign * farDist)
+	end
+	local dropAtAltitude = Vector3.new(dropPoint.X, cfg.Altitude, dropPoint.Z)
+
+	local model = buildHelicopterModel(CFrame.lookAt(entryPos, dropAtAltitude))
+	local transport = { squadId = squadId, cancelled = false }
+	activeTransports[model] = transport
+
+	local function cleanup()
+		activeTransports[model] = nil
+		if model.Parent then
+			model:Destroy()
+		end
+	end
+
+	-- 街外Entry → 投下地点
+	if not heliFlyTo(model, transport, entryPos, dropAtAltitude, cfg.CruiseSpeed, token) then
+		cleanup()
+		return
+	end
+
+	-- 兵士を1人ずつ降下させる(DropInterval間隔)
+	for i = 1, entry.count do
+		if transport.cancelled or roundToken ~= token or retiredSquads[squadId] then
+			cleanup()
+			return
+		end
+		local landPos = jitterPoint(dropPoint, cfg.LandingSpread)
+		local enemy = spawnEnemy("Soldier", landPos, squadId, {
+			deploying = true,
+			deployFromY = cfg.Altitude - cfg.DropOffsetY,
+			suppressSpawnEffect = true,
+		})
+		if not enemy then
+			-- systemDisabled等でspawnEnemyが失敗した場合でも、この個体ぶんのpendingは
+			-- 必ず消費する(残留するとCountAliveが永久に0にならず再派遣が起きなくなる)
+			warn(("[EnemyManager] ヘリ降下でSoldierの生成に失敗しました (squad=%d)"):format(squadId))
+		end
+		if pendingDeployments[squadId] then
+			pendingDeployments[squadId] -= 1
+			if pendingDeployments[squadId] <= 0 then
+				pendingDeployments[squadId] = nil
+			end
+		end
+		if i < entry.count then
+			task.wait(cfg.DropInterval)
+		end
+	end
+
+	if transport.cancelled or roundToken ~= token then
+		cleanup()
+		return
+	end
+
+	-- 投下地点 → 反対側Exit
+	heliFlyTo(model, transport, dropAtAltitude, exitPos, cfg.ExitSpeed, token)
+	cleanup()
+end
+
+-- squadList = Stage.Squad の配列({ {type=..., count=..., transport=...}, ... })。
+-- transportが無ければ従来どおりの直接生成、"helicopter"ならヘリ輸送、それ以外の文字列は
+-- warnして無視する(通常スポーンへの黙示フォールバックはしない。§27)
 function EnemyManager.DeploySquad(squadId, squadList)
 	if systemDisabled then
 		return
@@ -911,31 +1241,38 @@ function EnemyManager.DeploySquad(squadId, squadList)
 		-- この1回の派遣に閉じた使用済み座標の集合(手順6)。road個体だけが書き込む
 		local usedPoints = {}
 		for _, entry in squadList do
-			local etype = Config.Threat.EnemyTypes[entry.type]
-			local isRoad = etype ~= nil and etype.Movement == "road"
-			for _ = 1, entry.count do
-				-- 各個体を生成する直前の撤退済みチェック(Step5-0)。派遣途中で昇格すると
-				-- ここで止まり、旧squadIdの残り個体を生成しなくなる
-				if roundToken ~= token or retiredSquads[squadId] then
-					return
-				end
-				local point = pickSpawnPoint(usedPoints)
-				if isRoad then
-					-- パトカー(将来の戦車も)は交差点そのものを使う。ジッターをかけると
-					-- 湧いた瞬間どちらの道路線にも乗っていない状態になり横滑りするため(§4-4)
-					usedPoints[pointKey(point)] = true
-				else
-					-- 警官(将来の兵士)は交差点中心からジッターで散らす。同じ交差点の共有は許容する(§4-1)
-					local jitter = Config.Threat.Spawn.Jitter
-					local ang = rng:NextNumber(0, math.pi * 2)
-					local r = jitter * rng:NextNumber(0.5, 1.0)
-					point = Vector3.new(point.X + math.cos(ang) * r, point.Y, point.Z + math.sin(ang) * r)
-				end
-				spawnEnemy(entry.type, point, squadId)
-				task.wait(Config.Threat.Spawn.Interval)
-				-- task.waitから戻った直後の撤退済みチェック(Step5-0)。待機中に昇格した場合に備える
-				if roundToken ~= token or retiredSquads[squadId] then
-					return
+			if entry.transport == "helicopter" then
+				deployByHelicopter(squadId, entry, token)
+			elseif entry.transport ~= nil then
+				warn(("[EnemyManager] 未知の輸送方式 '%s' (タイプ '%s') のentryを無視します")
+					:format(tostring(entry.transport), entry.type))
+			else
+				local etype = Config.Threat.EnemyTypes[entry.type]
+				local isRoad = etype ~= nil and etype.Movement == "road"
+				for _ = 1, entry.count do
+					-- 各個体を生成する直前の撤退済みチェック(Step5-0)。派遣途中で昇格すると
+					-- ここで止まり、旧squadIdの残り個体を生成しなくなる
+					if roundToken ~= token or retiredSquads[squadId] then
+						return
+					end
+					local point = pickSpawnPoint(usedPoints)
+					if isRoad then
+						-- パトカー(将来の戦車も)は交差点そのものを使う。ジッターをかけると
+						-- 湧いた瞬間どちらの道路線にも乗っていない状態になり横滑りするため(§4-4)
+						usedPoints[pointKey(point)] = true
+					else
+						-- 警官は交差点中心からジッターで散らす。同じ交差点の共有は許容する(§4-1)
+						local jitter = Config.Threat.Spawn.Jitter
+						local ang = rng:NextNumber(0, math.pi * 2)
+						local r = jitter * rng:NextNumber(0.5, 1.0)
+						point = Vector3.new(point.X + math.cos(ang) * r, point.Y, point.Z + math.sin(ang) * r)
+					end
+					spawnEnemy(entry.type, point, squadId)
+					task.wait(Config.Threat.Spawn.Interval)
+					-- task.waitから戻った直後の撤退済みチェック(Step5-0)。待機中に昇格した場合に備える
+					if roundToken ~= token or retiredSquads[squadId] then
+						return
+					end
 				end
 			end
 		end
@@ -951,6 +1288,19 @@ function EnemyManager.RetreatSquad(squadId)
 		return 0
 	end
 	retiredSquads[squadId] = true -- 以降このsquadIdからの新規生成をspawnEnemy/DeploySquadで防ぐ
+	pendingDeployments[squadId] = nil -- ヘリ飛行中の残り降下人数を破棄(Step5-1)
+
+	-- 飛行中のヘリ輸送を中断する(Step5-1)。将来★3実装後、非同期の事故防止として置く
+	-- (現状★2は通常プレイで発生しうる唯一のケース)。ヘリは即Destroyしてよい(§12)
+	for model, transport in activeTransports do
+		if transport.squadId == squadId and not transport.cancelled then
+			transport.cancelled = true
+			activeTransports[model] = nil
+			if model.Parent then
+				model:Destroy()
+			end
+		end
+	end
 
 	-- enemiesを反復しながら削除しない(取りこぼし防止)。対象を先に配列へ集めてから処理する
 	local toRetreat = {}
@@ -1004,8 +1354,10 @@ function EnemyManager.RetreatSquad(squadId)
 	return #toRetreat
 end
 
+-- pending(ヘリ飛行中でまだ地上にいない兵士)も加算する(Step5-1)。
+-- これが無いと「ヘリ飛行中は生存0体」を全滅と誤認し、余分な再派遣が予約されてしまう
 function EnemyManager.CountAlive(squadId)
-	local count = 0
+	local count = pendingDeployments[squadId] or 0
 	for _, enemy in enemies do
 		if enemy.squadId == squadId and enemy.alive then
 			count += 1
@@ -1039,9 +1391,20 @@ function EnemyManager.Clear()
 	table.clear(playerState)
 	table.clear(killCounts) -- RESULTでGetKillCounts()を読み終えた後のLOBBYで呼ばれるので、順序は問題ない
 	table.clear(retiredSquads) -- 次ラウンドでsquadIdが1から再利用されるため必須(Step5-0)
+	table.clear(pendingDeployments) -- 次ラウンドへ持ち越さない(Step5-1)
+	for model in activeTransports do
+		if model.Parent then
+			model:Destroy()
+		end
+	end
+	table.clear(activeTransports)
 	if folder then
 		folder:Destroy()
 		folder = nil
+	end
+	if transportFolder then
+		transportFolder:Destroy()
+		transportFolder = nil
 	end
 end
 

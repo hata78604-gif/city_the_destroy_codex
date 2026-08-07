@@ -387,6 +387,121 @@ Step 0(基盤整備)→ Step 1(タイム経済の可視化)→ Step 2(★1警官
 - 特に「撤退中の敵にバズーカ弾が衝突しない」「撤退開始後にパトカーが警官を追加で降ろさない」
   「旧段階の再派遣待ち中に昇格しても旧予約が発火しない」は実機でしか確認できないため重点的に見る
 - `FadeTime`の見た目(0.6秒で十分か)を確認し、変更する場合は理由とともに本ファイルへ記録する
+
+---
+
+# 敵システム Step 5-1 の実装(★2 軍用ヘリ輸送 + 兵士4人 + 機関銃5連射。2026-08-07)
+
+`STEP5_1_MILITARY_HELICOPTER_SOLDIER_SPEC.md`とユーザーからの追加指示に基づいて実装。実装前に
+変更計画を報告し、5点の追加指示(SpawnY値・画面端▲の降下中抑制・pending失敗時の消費・
+AttackIntervalの意味・湧き演出の抑制タイミング)を反映したうえで承認を得てから着手した。
+`ThreatManager.lua`は指示どおり無変更。
+
+---
+
+## 実装したもの
+
+### Config追加
+
+- `Config.lua` — `Config.Threat.EnemyTypes.Soldier`を新設(`Hits=1`/`AttackType="burst"`/
+  `BurstCount=5`/`BurstInterval=0.12`/`TimePenalty=0.5`/`ScoreReward=400`暫定値/`SpawnY=3`。
+  移動性能はPoliceOfficerと同値に揃え、差は攻撃方式のみに限定)
+- `Config.lua` — `Config.Threat.Stages[2]`(★2 軍隊。`Threshold=4000`暫定値。
+  `Squad={ {type="Soldier", count=4, transport="helicopter"} }`)を新設
+- `Config.lua` — `Config.Threat.HelicopterTransport`を新設(`Altitude`/`CruiseSpeed`/`ExitSpeed`/
+  `EntryMargin`/`DropInterval`/`DescendSpeed`/`DropOffsetY`/`LandingSpread`/`LandingAttackGrace`)
+- `Config.lua` — `Config.Sounds.MachineGun = ""`を追加(空文字。音源探しはスコープ外)
+
+### EnemyManager: ヘリ輸送・降下・5連射
+
+- `pendingDeployments`/`activeTransports`/`transportFolder`(モジュール状態)を新設
+- `spawnEnemy()`に第4引数`options`を追加(`{ deploying, deployFromY, suppressSpawnEffect }`)。
+  省略時は既存呼び出しと完全に同じ挙動
+- `EnemyManager.CountAlive()`が`pendingDeployments`を加算するよう変更
+- `isBlocked()`の中身を`raycastMap()`(RaycastResultそのものを返す)に切り出し、`isBlocked`は
+  それをbool化するだけの薄いラッパーにした。警官のLOS判定の挙動・シグネチャは無変更
+- `resolveBurstShot()`/`fireBurst()`を新設。兵士の5連射本体。`enemyTracer`エフェクトを発火し、
+  命中数をまとめて`damagePlayer()`へ1回だけ渡す
+- `updateDirectEnemy()`の攻撃分岐に`etype.AttackType=="burst"`の判定を追加(敵タイプ名の
+  ベタ書き分岐はしていない)
+- `updateDeployingEnemy()`を新設。降下中は垂直移動のみ行い、着地で通常状態へ復帰させる
+- `updateEnemy()`に`enemy.deploying`優先の分岐を追加
+- `EnemyManager.OnExplosion()`に`not enemy.deploying`ガードを追加(後述「ハマった点」参照)
+- `buildHelicopterModel()`/`heliFlyTo()`/`jitterPoint()`/`deployByHelicopter()`を新設。
+  ヘリは`workspace.EnemyTransports`に生成し、`EnemyTypes`には登録しない
+- `EnemyManager.DeploySquad()`に`entry.transport`分岐を追加(`"helicopter"`ならヘリ輸送、
+  未知の文字列ならwarnして無視、`nil`なら既存の直接生成のまま)
+- `EnemyManager.RetreatSquad()`に`pendingDeployments`破棄・`activeTransports`の中断+即Destroyを追加
+- `EnemyManager.Clear()`に`pendingDeployments`/`activeTransports`/`transportFolder`の後始末を追加
+
+### EffectsClient: 曳光弾演出
+
+- `onEnemyTracer()`を新設。黄色系Neon Part(0.08秒でDestroy) + `Config.Sounds.MachineGun`
+  (0.02秒デデュープ)。赤い`enemyAim`とは別演出
+
+### UIController: 0.5秒UI・▲抑制・リザルト表記
+
+- `formatTimeDelta()`を新設。整数は`"%+d秒"`、0.5刻みは`"%+.1f秒"`。`spawnFloater()`が使用
+- 画面端▲の対象条件に`model:GetAttribute("Deploying") ~= true`を追加
+- リザルトの`(警察 N)`表記を`(敵 N)`に変更(内部データ構造は無変更)
+
+---
+
+## 暫定措置・妥協点
+
+- **★2 Threshold=4000 / Soldier ScoreReward=400 は暫定値**。最終クリア条件・★3以降・
+  スコア進行設計が確定した後に再調整する前提(指示書§37に明記)
+- **AttackInterval=3.0 / BurstInterval=0.12 / Altitude=75 / CruiseSpeed=80 / ExitSpeed=90 /
+  LandingAttackGrace=0.8 も暫定値**。実機で「楽しいか・見やすいか・理不尽でないか」を確認してから
+  調整する前提
+- **画面端▲の降下中抑制はユーザー追加指示による**。当初計画では「!」のみ抑制する予定だったが、
+  「降下中は▲も出さない」という明示指示を受けて`UIController.client.lua`の対象条件に
+  `Deploying`チェックを追加した
+- **ヘリが複数squadListエントリの1つとして扱われる場合、後続entryをブロックしない設計にはしていない**。
+  `deployByHelicopter()`は`DeploySquad`のループ内で直接(ネストした`task.spawn`を挟まずに)呼んでおり、
+  ヘリの飛行・降下が完了するまで同じ`squadList`内の後続entryへ進まない。現状の★2編成は
+  ヘリ単独entryのため実害は無いが、将来ヘリと別の輸送方式を同一Stageに混在させる場合は
+  再設計が必要
+- **画面端▲の降下中兵士は「!」と揃えて非表示にしたが、当初案では未対応だった**。ユーザーからの
+  明示指示で追加した(上記参照)
+
+---
+
+## ハマった点と対処
+
+- **降下中の兵士がバズーカの爆風だけでは無敵にならなかった**: `spawnEnemy()`の`options.deploying`で
+  `CanQuery=false`にしただけでは、直撃レイキャスト(バズーカの弾がheliモデルに当たる判定)は防げても、
+  `EnemyManager.OnExplosion()`(`DestructionManager`の`blastListeners`経由で全爆発から呼ばれる、
+  距離ベースの爆風判定)は`CanQuery`を一切見ないため、降下中の兵士が爆風の巻き添えで死亡しうる
+  状態になっていた。指示書の「降下中はバズーカ等による被弾を無効化」を満たすため、
+  `OnExplosion()`のループ条件に`not enemy.deploying`を追加して解決した。実装中の静的レビューで
+  気づいたため実機確認前に修正済み
+- **`pendingDeployments`のCountAlive誤判定対策で、加算と減算のタイミングが非対称であることに注意が必要だった**:
+  加算はyield前に完全同期で行う必要がある一方、減算は「`spawnEnemy()`で`enemies`テーブルへ
+  登録した直後」でなければ一瞬の0人窓が生じる。この非対称性を明示的にコメントで残した
+  (`EnemyManager.lua`内の該当箇所参照)
+
+---
+
+## 次ステップへの申し送り
+
+- **実機確認はユーザー側の作業**: `SETUP.md` **Phase 10** のチェックリストに沿って確認する。
+  Phase 9と異なり一時設定は不要(★2は本番`Config.Threat.Stages[2]`として実装済み)
+- **次はStep 5-2(スナイパー)**: `THREAT_DESIGN_PROPOSAL.md`のStep 5節を
+  「Step 5-1: 軍用ヘリ輸送+兵士4人+5連射」「Step 5-2: スナイパー」に整理済み。詳細設計は未着手
+- 画面端▲の降下中抑制・ヘリの複数entry非対応は「暫定措置・妥協点」参照。将来ヘリと他の輸送方式が
+  混在するケースが出た場合は`deployByHelicopter`をネストした`task.spawn`に変更する再設計が必要
+
+---
+
+## ユーザー手作業
+
+- `SETUP.md` **Phase 10(★2 軍用ヘリ + 兵士4人 + 機関銃5連射)** のチェックリストをStudioで上から
+  順に確認する。一時設定は不要
+- 特に「降下中はバズーカの直撃・爆風とも無効」「ヘリ飛行中に生存0と誤判定されない」
+  「建物の陰に隠れると以降の弾が当たらない」は実機でしか確認できないため重点的に見る
+- ★2 Threshold=4000・Soldier ScoreReward=400・機関銃関連の各暫定値は、実機で「楽しいか・
+  理不尽でないか」を確認したうえで、必要なら調整して本ファイルと`CURRENT_SPEC.md`へ理由とともに記録する
 - Rojoでの同期(`rojo serve`)を継続し、Studio側のRojoプラグインが接続されていることを確認
 
 ---
@@ -428,3 +543,117 @@ Step 0(基盤整備)→ Step 1(タイム経済の可視化)→ Step 2(★1警官
 - 以降の実装作業では、完了報告の前に`lint.bat`を実行し、既存の警告との差分を報告に含めること
 - `StarterPlayer/StarterPlayerScripts/EffectsClient.client.lua`15行目に`LocalUnused: Variable 'Players' is never used`
   という新規警告が見つかっている(今回のスコープ外のため未修正)。実害はなく、単純な未使用importと見られる
+
+---
+
+# Step 5-1 プレイテスト後の操作改善: モバイル発射ボタンの廃止(2026-08-07)
+
+Step5-1実装後の実機プレイテストで判明した2件の問題(HUD重なり・モバイル照準の精度)を修正した回のうち、
+モバイル照準の修正を2段階で行った経緯の記録。
+
+## 経緯
+
+1. **1段階目**: モバイル照準を「画面中央(`aimCameraCenter`)」から「世界タップ地点」へ変更。
+   タップで即1発 + 右下「発射」ボタン長押しで最後のタップ地点へ連射、という方式を実装した
+2. **2段階目(今回)**: 実機プレイテストの結果、この2段階方式は「発射ボタンの役割が薄く、
+   操作が複雑」と判断され、**モバイルの「発射」ボタン自体を完全に廃止**。
+   ワールドタップ1回=1発に一本化した
+
+## 実装したもの
+
+### WeaponClient.client.lua
+
+- `WeaponClientEvents`のBindableEvent一覧から`FireRequest`/`FireRelease`/`MobileAimMissing`を削除。
+  最終的に`{ "EquipRequest", "DetonateRequest", "WeaponSelected" }`のみ
+- `lastMobileAimPos`(直近のタップ地点を保存する仕組み)を完全削除。RESULTリセット・
+  Character再生成リセットの処理もあわせて削除(保存先が無くなったため不要)
+- `aimMobileTarget()`を削除(用途消滅)
+- `TouchTapInWorld`ハンドラを「`processedByUI`/`TouchEnabled`ガード → `raycastFromScreenPoint` →
+  `tryFire()`を1回」だけに変更。**`startFiring()`を呼ばない**ため、`AutoFire=true`のバズーカでも
+  モバイルタップでは連射ループが始まらない
+- `child.Activated`(PC用)に`UserInputService:GetLastInputType() == Enum.UserInputType.Touch`の
+  ガードを追加。タッチ対応デバイスでは`Tool.Activated`もタップに反応して発火しうるため、
+  直前の入力がタッチ由来なら何もせず`TouchTapInWorld`側に処理を譲る(二重発火防止)
+
+### UIController.client.lua
+
+- モバイル「発射」ボタン一式(`fireBtn`/`activeInput`/`beginFire`/`endFire`/関連の
+  `InputBegan`/`InputEnded`)を削除
+- `MobileAimMissing`の購読と「画面をタップして狙ってください」の通知処理を削除
+  (`showNotice()`自体はリモート爆弾の距離超過通知など他用途があるため残す)
+- 起爆ボタンを`UDim2.new(1, -20, 1, -240)`(旧発射ボタンの上)から`UDim2.new(1, -20, 1, -20)`
+  (右下隅)へ移動。発射ボタンが無くなったことで空いた位置を埋める形
+- 発射ボタン削除に伴い`UserInputService`のrequireが未使用になったため削除
+
+## 暫定措置・妥協点
+
+- **モバイルにバズーカの連射操作は無い(1タップ1発のみ)**。指示書どおり「将来必要になれば
+  プレイテストで判断」という位置づけで、今回は意図的に実装しない
+- **`UserInputService:GetLastInputType()`によるPC/モバイル振り分けは実機での二重発火確認が未実施**。
+  静的には正しい(タッチ対応PCでもマウス操作は`GetLastInputType()`が`MouseButton1`等を返すため
+  `Tool.Activated`が生きたままになる)と判断しているが、**Studioでの実機確認が必須**
+
+## ハマった点と対処
+
+- **`lastMobileAimPos`の削除漏れ**: `onCharacter()`内に`lastMobileAimPos = nil`の初期化行が
+  1箇所残っていた(Character再生成時のリセット処理)。grepで全箇所を洗い出して削除
+
+## 次ステップへの申し送り
+
+- `SETUP.md` **Phase 4**の追加チェック項目(モバイルでの誤射防止・四隅タップ・起爆ボタン位置)を
+  Studioで確認すること。特に「タッチ1回で本当に1発だけになるか」(`Tool.Activated`との二重発火)は
+  実機でしか確認できない
+- モバイルの連射が実際に必要かどうかは、この1タップ1発方式での実機プレイテストを経てから判断する
+
+## ユーザー手作業
+
+- `SETUP.md` **Phase 4**を上から順に確認。特に以下を重点的に見る:
+  - モバイルでワールドを1回タップしたとき、バズーカが1発だけ発射されること(連射にならないこと)
+  - 起爆ボタンがスマホの標準操作UI(移動スティック・ジャンプボタン等)・武器スロットと重ならないこと
+  - カメラスワイプ・移動スティック操作・武器スロット/起爆ボタンのタップで誤射しないこと
+
+---
+
+# Step 5-1 プレイテスト後UI改善②: 起爆ボタン位置修正 + 装備中武器スロットの視認性改善(2026-08-07)
+
+前回の改修で起爆ボタンを右下隅(`UDim2.new(1,-20,1,-20)`)へ移動したが、その後のスマホ実機テストで
+2件の問題が判明した。
+
+## 実装したもの
+
+### 起爆ボタンの位置修正
+
+- 右下隅に置いたところ、スマホ実機でRoblox標準の**ジャンプボタンと重なった**
+- 旧モバイル「発射」ボタンがあった位置(`UDim2.new(1,-20,1,-130)`)へ再移動。この位置は
+  「右手親指で押しやすい」「ジャンプボタンより上に逃げられる」「武器スロットと水平方向に
+  十分離れている」という実績があったため採用
+- サイズ(100×60)・表示文字・色・`Visible`制御・`DetonateRequest`・Fキー起爆は無変更
+
+### 装備中武器スロットの視認性改善
+
+- 黄色3pxの枠だけではスマホ実機で「今どの武器を装備しているか」が目立たなかった
+- 装備中の見た目を「ほぼ黒背景(`Color3.fromRGB(8,8,10)`・`Transparency=0.05`)+ 黄色5px枠」に強調
+- 未装備スロットの見た目(`Color3.fromRGB(30,30,35)`・`Transparency=0.3`・枠OFF)は変更していない
+- 色・透明度・枠太さをすべて`UIController.client.lua`内のローカル定数(`SLOT_NORMAL_*`/
+  `SLOT_SELECTED_*`)に集約し、スロット生成時と`WeaponSelected`受信時の両方が同じ定数を参照する
+  (初期生成時と装備解除時で通常色がズレる事故を防ぐため)
+- クールダウン中の暗転`overlay`とは別状態として共存させる(overlayは変更していない。黄色太枠を
+  完全に隠す構造にはなっていないと判断し、ZIndexは変更していない)
+
+## 暫定措置・妥協点
+
+- **クールダウンoverlayが黄色太枠を隠さないことは静的な構造から判断したもので、実機での見た目
+  確認は未実施**。もし実機で隠れて見える場合は、ZIndexの調整が別途必要になる
+
+## 次ステップへの申し送り
+
+- `SETUP.md` **Phase 4**に追加したチェック項目(起爆ボタンの位置・武器スロットの選択表示)を
+  Studioで確認すること
+
+## ユーザー手作業
+
+- `SETUP.md` **Phase 4**を上から順に確認。特に以下を重点的に見る:
+  - 起爆ボタンがジャンプボタン・武器スロットと重ならないこと
+  - バズーカ/エアストライク/リモート爆弾を装備したとき、対応するスロットだけが黒背景+黄色太枠になること
+  - 武器をしまったとき全スロットが通常表示に戻ること
+  - エアストライクのクールダウン中でも装備中であることが黄色太枠で判別できること

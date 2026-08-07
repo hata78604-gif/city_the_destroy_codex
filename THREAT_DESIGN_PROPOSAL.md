@@ -445,14 +445,18 @@ Config.Threat = {
 			DeployInterval = 15,       -- 初回降車後、車が生きていれば次の降車までの秒数(放置への圧力)
 			MaxDeployTrips = 2,        -- 1台が生涯で行う降車回数の上限(nil=無制限。無制限にすると放置戦略でパーツ予算が破綻しうる)
 		},
-		Helicopter = {
-			DisplayName = "警察ヘリ",
-			Body = "heli", Altitude = 60, OrbitRadius = 45,
-			Hits = 2, HitCooldown = 0.25,
-			Movement = "air", MoveSpeed = 34, StopDistance = 45,
-			AttackType = "shoot", AttackRange = 90, AttackInterval = 1.8,
-			TimePenalty = 2, ScoreReward = 1200, TimeReward = 12, Parts = 6,
-		},
+		-- ▼ Step 5-1で不採用。以下の`Helicopter`(攻撃可能な敵として実装する案)は
+		-- 実装時に方針転換し、EnemyTypesに登録しない輸送演出専用オブジェクトへ変更した。
+		-- 採用した設計は§6 Step 5-1、実装は`CURRENT_SPEC.md` §14を参照。このブロックは
+		-- 検討過程の記録として残すが、現行仕様ではない
+		-- Helicopter = {
+		--     DisplayName = "警察ヘリ",
+		--     Body = "heli", Altitude = 60, OrbitRadius = 45,
+		--     Hits = 2, HitCooldown = 0.25,
+		--     Movement = "air", MoveSpeed = 34, StopDistance = 45,
+		--     AttackType = "shoot", AttackRange = 90, AttackInterval = 1.8,
+		--     TimePenalty = 2, ScoreReward = 1200, TimeReward = 12, Parts = 6,
+		-- },
 		Soldier = {
 			DisplayName = "兵士",
 			Body = "human",
@@ -492,18 +496,21 @@ Config.Threat = {
 				{ type = "PoliceOfficer", count = 2 }, -- ★変更: 4→2。残りはパトカーが運ぶ(§3-3末尾の解説を参照)
 			},
 		},
-		{
-			Name = "★2 増援",
-			Threshold = 4000,
-			Telop = "警察が増援を要請した!",
-			Sound = "Siren",
-			RespawnDelay = 20,
-			Squad = {
-				{ type = "PoliceCar", count = 4 },
-				{ type = "PoliceOfficer", count = 8 },
-				{ type = "Helicopter", count = 1 },
-			},
-		},
+		-- ▼ Step 5-1で不採用。以下は検討時のたたき台(パトカー4台+警官8人+攻撃可能なヘリ1機)。
+		-- 実際に実装した★2はSoldier×4(ヘリ輸送)のみ。採用理由は§6 Step 5-1、
+		-- 実装は`CURRENT_SPEC.md` §14を参照。このブロックは検討過程の記録として残す
+		-- {
+		--     Name = "★2 増援",
+		--     Threshold = 4000,
+		--     Telop = "警察が増援を要請した!",
+		--     Sound = "Siren",
+		--     RespawnDelay = 20,
+		--     Squad = {
+		--         { type = "PoliceCar", count = 4 },
+		--         { type = "PoliceOfficer", count = 8 },
+		--         { type = "Helicopter", count = 1 },
+		--     },
+		-- },
 		{
 			Name = "★3 軍隊",
 			Threshold = 10000,
@@ -533,7 +540,7 @@ Config.Threat = {
 - **放置した場合の頭数増加に上限があること(`MaxDeployTrips`)は意図的。** 無制限にすると、1ラウンドを通してパトカーを一切攻撃しない戦略で警官が際限なく湧き続け、パーツ予算・難易度の両面で破綻しうる。上限に達した車は「もう警官を運ばないが、倒せば+8秒/+500点は入る」置物になる ── これにより「もう脅威ではないが、倒す理由は残っている」という状態を作り、放置一辺倒を牽制する。
 - **実装上の注意**: 個体生成は `spawnEnemy(type, position, squadId)` のような単一関数に集約し、警官の直接スポーンも車からの降車もこの関数だけを通すこと。squadId の付け忘れが構造的に起きないようにする(§7-1 ★9 も参照)。
 
-**★2への波及に関する注記**: `PoliceCar` の輸送挙動は `Config.Threat.EnemyTypes` の共有定義のため、★2(パトカー4台)にも自動的に適用される。★2の編成・報酬の再設計は Step 5(§6)で ★2 に着手する時点で改めて行う。現時点の Stages.★2 の値は**未反映のたたき台のまま**であることに注意。
+**★2への波及に関する注記(Step 5-1実装により確定・2026-08-07)**: 上記のたたき台(パトカー4台+警官8人+ヘリ1機)は不採用となった。実際に実装した★2は`Soldier×4`(ヘリ輸送。`PoliceCar`は含まない)。詳細は§6 Step 5-1、`CURRENT_SPEC.md` §14を参照。
 
 ### 3-4. `Config.Weapons`(改修)
 
@@ -793,7 +800,7 @@ Config.RemoteNames = {
 | ★2 | パトカー4 + 警官8 + ヘリ1 | 4×8 + 8×3 + 1×12 = **+68秒** | 約55秒 | +1.24 秒/秒 |
 | ★3 | 戦車2 + 兵士8 | 2×15 + 8×4 = **+62秒** | 約60秒 | +1.03 秒/秒 |
 
-**★2への波及に関する注記**: `PoliceCar` の輸送挙動は共有定義のため★2(パトカー4台)にも自動的に適用されるが、上表の★2の値は**未反映のたたき台のまま**(§3-3参照)。Step 5 で★2に着手する時点で改めて試算する。
+**★2への波及に関する注記(Step 5-1実装により確定・2026-08-07)**: 上表の★2(パトカー4+警官8+ヘリ1)は不採用のたたき台。実際に実装した★2は`Soldier×4`(1体あたり撃破+400点/0秒。ヘリ輸送。§3-3参照)で、この経済シミュレーションには未反映。実機バランス確認は`PROGRESS.md`のStep 5-1節・`CURRENT_SPEC.md` §14を参照。
 
 ### 5-3. 損失側(ガードレール適用後)
 
@@ -991,9 +998,22 @@ Config.RemoteNames = {
 撤退中の敵から攻撃されない・撤退中の敵にバズーカ弾が衝突しない・撤退でスコアやタイムが増えない。
 詳細は`STEP5-0`の実装記録(`PROGRESS.md`)と`CURRENT_SPEC.md` §13を参照。
 
-### Step 5: ★2(ヘリ + 増援)
+### Step 5-1: ★2(軍用ヘリ輸送 + 兵士4人 + 機関銃5連射)★実装済み(2026-08-07)
 
-Config に `Helicopter` と★2の Stage を足し、`Movement = "air"` の分岐(高度固定 + 周回)を EnemyManager に追加する。**ThreatManager は無変更**(データ駆動が効いていることの検証になる)。
+以下の§3-3にある古い`Helicopter`案(`Body="heli"`・`Movement="air"`・`AttackType="shoot"`の**攻撃可能な敵**として実装する案)は**採用しなかった**。実装時に方針を変更し、ヘリは戦闘する敵ではなく**兵士4人を投入するための輸送演出専用オブジェクト**にした。理由:
+
+- ヘリ自体の被弾・撃破・HP・方向インジケータ・頭上「!」を今回のスコープに含めると実装量が倍増する
+- 「★2の脅威」は地上の兵士(機関銃5連射)で十分に表現できる。ヘリは「軍が来た」という**演出**の役割に限定してよい
+- ヘリを`Config.Threat.EnemyTypes`に登録しないことで、`CountAlive`・画面端▲・爆風判定・killCounts・スコアの対象から**自動的に**外れる(個別の除外条件を足す必要がない)
+
+Config に `Soldier`(`AttackType="burst"`)と★2の`Stage`(`Squad={ {type="Soldier", count=4, transport="helicopter"} }`)を足し、ヘリの飛行・降下ロジックは`EnemyManager`内に閉じた機構(`EnemyTypes`に登録しない`workspace.EnemyTransports`のオブジェクト)として実装した。**`ThreatManager`は無変更**(データ駆動が効いていることの検証になった)。
+
+実装の詳細・設計判断は`CURRENT_SPEC.md` §14、実装記録は`PROGRESS.md`の「Step 5-1」節を参照。
+
+### Step 5-2: スナイパー(未着手)
+
+★2の第2波として、屋上に配置する狙撃タイプの敵を追加する。今回のスコープには含まれない
+(`STEP5_1_MILITARY_HELICOPTER_SOLDIER_SPEC.md` §2「今回実装しないもの」参照)。詳細設計は未着手。
 
 ### Step 6: ★3(戦車 + 建物破壊)
 

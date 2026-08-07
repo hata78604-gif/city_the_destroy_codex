@@ -7,8 +7,10 @@
 -- HUDの生成はすべて UIController に一本化されている。
 --
 -- 担当:
--- ・クリック / タップ(Tool.Activated/Deactivated)で照準位置に発射リクエストを送る。
+-- ・PC: クリック(Tool.Activated/Deactivated)でマウス位置に発射リクエストを送る。
 --   AutoFireが真の武器(バズーカ)は押しっぱなしで連射する(Step4d)
+-- ・モバイル: 3Dワールドをタップ(UserInputService.TouchTapInWorld)した地点へ、
+--   その場で1発だけ発射する(改修#3。長押し連射はPCのみ)
 -- ・数字キー 1/2/3 での武器切替(標準ツールバーはUIController側で
 --   無効化しているため、キー処理もここで自前で行う)
 -- ・F キーでリモート爆弾の起爆
@@ -17,8 +19,6 @@
 -- UIController との連携は PlayerScripts 内の BindableEvent
 -- (WeaponClientEvents フォルダ)で行う:
 --   EquipRequest    (UI → ここ) スロットタップによる武器切替の依頼
---   FireRequest     (UI → ここ) モバイル発射ボタンを押した(画面中央に向けて連射開始)
---   FireRelease     (UI → ここ) モバイル発射ボタンを離した(連射停止。Step4d)
 --   DetonateRequest (UI → ここ) 起爆ボタン
 --   WeaponSelected  (ここ → UI) 装備中の武器キー(外したら nil)
 --------------------------------------------------------------------
@@ -43,7 +43,7 @@ local camera = workspace.CurrentCamera
 local eventsFolder = Instance.new("Folder")
 eventsFolder.Name = "WeaponClientEvents"
 local events = {}
-for _, name in { "EquipRequest", "FireRequest", "FireRelease", "DetonateRequest", "WeaponSelected" } do
+for _, name in { "EquipRequest", "DetonateRequest", "WeaponSelected" } do
 	local ev = Instance.new("BindableEvent")
 	ev.Name = name
 	ev.Parent = eventsFolder
@@ -58,17 +58,17 @@ local equippedTool = nil
 local lastFire = 0
 local hooked = {} -- Activated/Deactivated を二重接続しないための記録
 local roundState = "LOBBY"
-local firingToken = 0 -- 連射ループの世代トークン。増やすだけで現在のループを止められる
+local firingToken = 0 -- 連射ループの世代トークン。増やすだけで現在のループを止められる(PCの長押し連射用)
 
 roundStateRemote.OnClientEvent:Connect(function(state)
 	roundState = state
 	if state ~= "BATTLE" then
-		firingToken += 1 -- LOBBY/RESULT中は撃ち続けない
+		firingToken += 1 -- LOBBY/RESULT中は撃ち続けない(PCの長押し連射を止める)
 	end
 end)
 
 local function tryFire(targetPos)
-	if not equippedTool then
+	if not equippedTool or not targetPos then
 		return
 	end
 	local key = equippedTool:GetAttribute("WeaponKey")
@@ -126,16 +126,38 @@ local function startFiring(aimFn)
 	end)
 end
 
--- モバイル発射ボタン用の狙点: 画面中央=カメラの向いている先
-local function aimCameraCenter()
-	local origin = camera.CFrame.Position
-	local dir = camera.CFrame.LookVector
+-- 画面座標(スクリーン空間。GuiInset込み)から3Dの着弾点を求める。
+-- ScreenPointToRayを使う(ViewportPointToRayとは異なり、モバイルのCore UI insetを
+-- 考慮した座標系で扱えるため。タップ座標は同じスクリーン空間で渡ってくる)
+local function raycastFromScreenPoint(screenPos)
+	local ray = camera:ScreenPointToRay(screenPos.X, screenPos.Y)
+	local dir = ray.Direction.Unit
 	local params = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
 	params.FilterDescendantsInstances = { player.Character }
-	local result = workspace:Raycast(origin, dir * 1000, params)
-	return if result then result.Position else origin + dir * 500
+	local result = workspace:Raycast(ray.Origin, dir * 1000, params)
+	return if result then result.Position else ray.Origin + dir * 500
 end
+
+-- モバイルの世界タップ射撃(改修#3)。1タップ=1発のみで、startFiring()は呼ばない
+-- (AutoFire=trueのバズーカでも連射ループを開始させないため)。
+-- TouchTapInWorldはUIに処理されたタップ(武器スロット・起爆ボタン・移動スティックなど、
+-- いずれも実体はGuiButton)を processedByUI=true として除外してくれる。
+-- カメラドラッグはタップではなくドラッグ操作のためこのイベント自体が発火しない。
+-- TouchEnabledガードは本来無くてもこのイベントはタッチ由来でしか発火しないが、
+-- 「モバイル専用経路である」ことをコード上明示するために残す
+UserInputService.TouchTapInWorld:Connect(function(position, processedByUI)
+	if processedByUI then
+		return
+	end
+	if not UserInputService.TouchEnabled then
+		return
+	end
+	local targetPos = raycastFromScreenPoint(position)
+	if targetPos then
+		tryFire(targetPos) -- タップした地点へ1発(バズーカ/エアストライク/リモート爆弾いずれも共通)
+	end
+end)
 
 --------------------------------------------------------------------
 -- 武器切替
@@ -189,8 +211,15 @@ local function onCharacter(char)
 			events.WeaponSelected:Fire(child:GetAttribute("WeaponKey"))
 			if not hooked[child] then
 				hooked[child] = true
-				-- クリック/タップで連射開始、離す・ツールが外れたら停止(照準はマウス位置=タッチ位置)
+				-- PCのクリックで連射開始(モバイルのワールドタップ射撃はTouchTapInWorld側の専任)。
+				-- Tool.Activatedはタッチ端末でもTouch入力に対して発火するため、直前の入力種別が
+				-- Touchのときはここで何もしない(TouchTapInWorld側の1タップ1発と二重発火させないため)。
+				-- UserInputService.TouchEnabledで判定しないのは、タッチ対応PCでは常にtrueになり
+				-- マウスクリックまで無効化されてしまうため(GetLastInputTypeは入力ごとに動的に判定できる)
 				child.Activated:Connect(function()
+					if UserInputService:GetLastInputType() == Enum.UserInputType.Touch then
+						return
+					end
 					startFiring(aimMouse)
 				end)
 				child.Deactivated:Connect(stopFiring)
@@ -241,10 +270,6 @@ end)
 -- UIControllerからの依頼(ボタン類はすべてUIController側で描画)
 --------------------------------------------------------------------
 events.EquipRequest.Event:Connect(equipWeapon)
-events.FireRequest.Event:Connect(function()
-	startFiring(aimCameraCenter)
-end)
-events.FireRelease.Event:Connect(stopFiring)
 events.DetonateRequest.Event:Connect(function()
 	actionRemote:FireServer("Detonate")
 end)

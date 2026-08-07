@@ -55,9 +55,9 @@ StarterPlayer/StarterPlayerScripts
 - **WeaponServer.lua**: バズーカ(直進弾+レイキャスト)・エアストライク(矩形マーカー予告+編隊による絨毯爆撃)・リモート爆弾(クリック位置設置+起爆)の3武器を実装。エアストライクは`PlaneCount`機がプレイヤー→クリック地点の向きに引いた爆撃線の上を通過しながら`BombsPerPlane`発ずつ投下する(`buildSchedule`/`planeLateral`/`buildPlane`)。**戦闘機の速度・投下地点・飛行時間はすべて投下スケジュールから導出**しており、独立した入力値を持たない(§12-4)。各爆発は`maxReal = MaxRealPerBomb`で`Explode`を呼び、`scoreScale`は渡さない(連鎖ボーナスはリモート爆弾専用)。リモート爆弾は設置時に`MaxPlaceDistance`の**水平距離**判定を行い、超過時は爆弾を作らず・設置数もクールダウンも消費せず`Hud "notice"`を本人にだけ送る(`placeBomb`。判定はサーバー側のみで、クライアントは変更していない)。起爆時は同時起爆数から`chainMultiplier()`で倍率を求め、各`Explode(ctx)`に`scoreScale`として渡したうえで`Hud "chain"`を送る(×1のときは送らない)。ツール配布、`leaderstats`スコア管理、クールダウン管理もここ。`GetTotalScore()`は`ThreatManager`の段階判定用(`Config.Threat.ScoreSource`で合計/最高を切替)。`GetRanking()`の各エントリには`userId`(`player.UserId`)も含む(`name`/`score`は従来どおり。`GameManager`が`EnemyManager.GetKillCounts()`とこの`userId`で突き合わせて撃破数をマージする。`DisplayName`は一意でないため使わない)。
 - **VisualSetup.lua**: 起動時1回だけライティング(明るさ・時刻・霞み)とTerrain草地を設定。`Lighting.Technology`だけはスクリプトから変更できないため手動設定が必要(SETUP.md参照)。
 - **TemplateValidator.lua**: `ReplicatedStorage/BuildingTemplates`内のModelを検証し、パーツ数・サイズの警告を出す。従来モード(`chooseBuildingSource`)からのみ呼ばれる。**グリッドモードでは呼ばれない**。
-- **WeaponClient.client.lua**: `Tool.Activated`でのクリック/タップ発射(`Mouse.Hit.Position`をサーバーへ送信)、数字キー1/2/3での武器切替、Fキー起爆。UIControllerとは`WeaponClientEvents`フォルダ内のBindableEvent(`EquipRequest`/`FireRequest`/`DetonateRequest`/`WeaponSelected`)で連携。
+- **WeaponClient.client.lua**: PCは`Tool.Activated`でのクリック発射(`Mouse.Hit.Position`をサーバーへ送信。バズーカは押しっぱなしで連射)。モバイルは`UserInputService.TouchTapInWorld`で3Dワールドをタップした地点へその場で1発だけ発射する(押しっぱなし連射は無し。詳細は§14-9参照)。数字キー1/2/3での武器切替、Fキー起爆も担当。UIControllerとは`WeaponClientEvents`フォルダ内のBindableEvent(`EquipRequest`/`DetonateRequest`/`WeaponSelected`)で連携。
 - **EffectsClient.client.lua**: `Effect`リモートを受けて爆発(火花+煙+閃光+音+カメラシェイク)・絨毯爆撃の矩形マーカー(`"marker"`。`length`/`width`/`direction`を受け取り`CFrame.lookAt`で向きを付ける。Instanceは1個だけ)・戦闘機の飛行音(`"jet"`)・建物崩壊の粉塵・NPC撃破エフェクト・各種効果音を再生。**多数の爆発が短時間に連続したときの演出の合流処理**を持つ: カメラシェイクは加算ではなく`math.max`で更新し(§12-5)、爆発音は`playSound`の`dedupeInterval`引数(0.1秒)で間引く。どちらも爆発全般に効くので、絨毯爆撃18発でもリモート爆弾10連鎖でも同じように抑えられる。`"timeGain"`/`"timeLoss"`はタイム増減音で、3D減衰させないためカメラ位置基準で再生する(`data.position`は常にnilで届く)。敵関連: `"enemySpawn"`(湧き演出)・`"enemyAim"`(赤い予告ビーム。`duration`秒でフェード後Destroy)・`"enemyShotHit"`(被弾音+シェイク)・`"enemyShotMiss"`(はずれ音のみ)・`"enemyKill"`(撃破演出)・`"enemyDeploy"`(Step3手順7。パトカーの位置から青いリングが半径2→12まで広がりつつ`Transparency`が1へ、0.4秒でDestroy。生成するInstanceは1個のみ)・`"threatUp"`(段階昇格音。`Config.Sounds[data.sound]`)。**被弾フラッシュ(`Hits>1`の敵が光る演出)はリモートを使わずEnemyManager内で完結する**(EffectsClientの担当ではない)。
-- **UIController.client.lua**: HUD(残り時間・スコア・武器スロット・クールダウン暗転・中央テロップ)、モバイル用発射/起爆ボタン、リザルト画面をすべて生成。標準の`Backpack`CoreGuiを無効化(自作スロットとの二重表示防止)。`Hud`リモートを購読し、タイム増減時のタイマー色フラッシュ・「+10秒!」フローティング(合算コアレス対応)・被弾ビネット(`Active=false`の全画面`Frame`)・操作失敗の通知(`"notice"`。画面中央やや下・1.2秒・世代トークンで差し替えるため連打しても重ならない。中央テロップとは別ラベル)・連鎖ボーナス表示(`"chain"`。スコアの下・0.8秒・倍率で色が変わる)を再生する。**HUDに追加するラベルは`Active = false`にする**(クリックを吸って武器が撃てなくなる事故を防ぐため。§12参照)。★インジケータ(`timerLabel`の左。`Hud "threat"`のdata.totalから件数を受け取り、ハードコードしない。段階0では`Visible=false`にして非表示にする)と、画面端の方向インジケータ(▲。`workspace.Enemies`を直接読む読み取り専用のクライアント側計算。サーバー通信は増やさない)も担当。**リザルト画面**: 順位行(撃破数を`(警察 N)`で併記)+サマリー行(破壊した建物数・全体破壊率)+建物リスト(破壊率1%以上のみ・降順・`ScrollingFrame`+`UIGridLayout`3列。`TextScaled`は使わずTextSize固定)+右下の「次へ」ボタン(押すと`Ready`を1回送信し`次のラウンドを準備中…`表示に切替)。画面を閉じるのは`RoundState`の"LOBBY"受信時のみ(自動クローズのタイマーは持たない)。`RoundState`が"RESULT"以外の状態(=BATTLE/LOBBY以外)を受けたときの`timerLabel`は固定文言"リザルト"を表示する(カウントダウン数字は出さない)。
+- **UIController.client.lua**: HUD(残り時間・スコア・武器スロット・クールダウン暗転・中央テロップ)、起爆ボタン(右下隅。モバイル発射ボタンは廃止済み。§14-9参照)、リザルト画面をすべて生成。標準の`Backpack`CoreGuiを無効化(自作スロットとの二重表示防止)。`Hud`リモートを購読し、タイム増減時のタイマー色フラッシュ・「+10秒!」フローティング(合算コアレス対応)・被弾ビネット(`Active=false`の全画面`Frame`)・操作失敗の通知(`"notice"`。画面中央やや下・1.2秒・世代トークンで差し替えるため連打しても重ならない。中央テロップとは別ラベル)・連鎖ボーナス表示(`"chain"`。スコアの下・0.8秒・倍率で色が変わる)を再生する。**HUDに追加するラベルは`Active = false`にする**(クリックを吸って武器が撃てなくなる事故を防ぐため。§12参照)。★インジケータ(`timerLabel`の左。`Hud "threat"`のdata.totalから件数を受け取り、ハードコードしない。段階0では`Visible=false`にして非表示にする)と、画面端の方向インジケータ(▲。`workspace.Enemies`を直接読む読み取り専用のクライアント側計算。サーバー通信は増やさない)も担当。**リザルト画面**: 順位行(撃破数を`(敵 N)`で併記。Step5-1で兵士もkillCountsに入るようになったため「警察」表記から変更済み)+サマリー行(破壊した建物数・全体破壊率)+建物リスト(破壊率1%以上のみ・降順・`ScrollingFrame`+`UIGridLayout`3列。`TextScaled`は使わずTextSize固定)+右下の「次へ」ボタン(押すと`Ready`を1回送信し`次のラウンドを準備中…`表示に切替)。画面を閉じるのは`RoundState`の"LOBBY"受信時のみ(自動クローズのタイマーは持たない)。`RoundState`が"RESULT"以外の状態(=BATTLE/LOBBY以外)を受けたときの`timerLabel`は固定文言"リザルト"を表示する(カウントダウン数字は出さない)。
 
 ---
 
@@ -267,8 +267,10 @@ StarterPlayer/StarterPlayerScripts
 | Spawn.Jitter | 6 | 交差点中心から警官を散らす最大距離(stud)。上限8(道路幅16の半分)。大きくしすぎるとバズーカ1発でまとめて倒せなくなる(Step3手順6) |
 | Marker.Enabled / MaxDistance / Text / Color | true / 300 / "!" / 赤 | 頭上マーカー(BillboardGui) |
 | Indicator.Enabled / MaxDistance / PoolSize / UpdateInterval / Margin | true / 400 / 8 / 0.1 / 40 | 画面端の方向インジケータ(クライアント側) |
-| EnemyTypes.PoliceOfficer / PoliceCar | (§末尾参照) | Step3完了により両方実装済み。Helicopter(Step5)/Tank(Step6)は未実装 |
-| Stages[1] | ★1警察・Threshold=1000・Squad={PoliceCar×2, PoliceOfficer×2}・RespawnDelay=20 | 現状1件のみ。残りの警官はパトカーが道中で降車させる(§末尾参照)。★2/★3は未実装の敵種別を参照するため未登録(登録するとエラーになる) |
+| EnemyTypes.PoliceOfficer / PoliceCar / Soldier | (§末尾参照) | Step3・Step5-1完了により3種とも実装済み。Tank(Step6)は未実装 |
+| HelicopterTransport.* | (§末尾参照) | Step5-1で新設。軍用ヘリの飛行・降下パラメータ。ヘリ自体はEnemyTypesに**登録しない**(戦闘する敵ではなく輸送演出専用) |
+| Stages[1] | ★1警察・Threshold=1000・Squad={PoliceCar×2, PoliceOfficer×2}・RespawnDelay=20 | 残りの警官はパトカーが道中で降車させる(§末尾参照) |
+| Stages[2] | ★2軍隊・Threshold=4000(暫定値)・Squad={Soldier×4, transport="helicopter"}・RespawnDelay=20 | Step5-1で新設。★3は未実装の敵種別(Tank)を参照するため未登録(登録するとエラーになる) |
 
 **Config.Threat.EnemyTypes.PoliceOfficer の内訳**
 
@@ -319,11 +321,46 @@ StarterPlayer/StarterPlayerScripts
 | TurnDuration | 0.25 | 曲がるときの向き補間にかける秒数 |
 | WaypointRadius | 10 | 中間ウェイポイントの到着判定半径(「通り過ぎたか」を内積で判定する方式と併用。MoveSpeed*TurnDurationより大きくないと交差点を周回し続ける) |
 
+**Config.Threat.EnemyTypes.Soldier の内訳(Step5-1で新設)**
+
+軍用ヘリで輸送される兵士。移動性能は警官と同じ値に揃え、警官との差を攻撃方式(5連射)だけに限定してある。
+
+| キー | 値 | 備考 |
+|---|---|---|
+| DisplayName | "兵士" | |
+| Body | "human" | PoliceOfficerと同じ人型組み立て(buildHumanBody)を流用 |
+| Hits | 1 | HPを上げて難易度を作らない既存方針を維持(§6決着済み論点と同じ考え方) |
+| HitCooldown | 0.25 | |
+| ApproachSpeed / MoveSpeed / StopDistance / AttackRange | 20 / 13 / 80 / 100 | 警官と同値。差は攻撃方式のみに限定 |
+| AttackType | "burst" | EnemyManagerはAttackTypeで分岐(敵タイプ名のベタ書き分岐はしない) |
+| AttackInterval | 3.0 | バースト"開始"から次のバースト"開始"までの間隔(警官のnextAttackと同じ意味)。5連射(約0.48秒)+ 休止(約2.5秒) |
+| BurstCount / BurstInterval | 5 / 0.12 | 5発が約0.48秒で終わる速度 |
+| TimePenalty | 0.5 | 1発命中ごとの秒数。5発命中で-2.5秒 |
+| ScoreReward | 400(暫定値) | 最終スコア設計確定まで意味を持たせすぎない |
+| TimeReward | 0 | 「敵はタイムを配らない」という既存方針を維持 |
+| SpawnY | 3 | PoliceOfficerと同じ人型なので同じ接地Y座標 |
+
+**Config.Threat.HelicopterTransport の内訳(Step5-1で新設)**
+
+軍用ヘリはConfig.Threat.EnemyTypesに登録しない輸送演出専用オブジェクト。`workspace.EnemyTransports`に生成され、`workspace.Enemies`/`enemies`テーブルのいずれにも入らないため、CountAlive・画面端▲・頭上「!」・爆風判定・killCounts・スコアのすべての対象外になる。
+
+| キー | 値 | 備考 |
+|---|---|---|
+| Altitude | 75 | 飛行高度。高層建物を避けつつ視認できる高さ |
+| CruiseSpeed / ExitSpeed | 80 / 90 | 往路/復路の速度。復路は演出を長引かせず速める |
+| EntryMargin | 80 | 街の外周からさらにこの距離だけ外側から出現する |
+| DropInterval | 0.18 | 兵士4人を降ろす間隔(秒) |
+| DescendSpeed | 70 | 兵士の垂直降下速度 |
+| DropOffsetY | 6 | ヘリ本体中央ではなく下部から降下して見えるようにするオフセット |
+| LandingSpread | 6 | 着地点の投下地点からのジッター半径(道路幅16の半分より小さい) |
+| LandingAttackGrace | 0.8 | 着地直後に一斉射撃させないための猶予秒数 |
+
 ### Config.Sounds
 | キー | 値 | 備考 |
 |---|---|---|
 | Explosion | rbxassetid://165969964 | |
 | Shot | rbxasset://sounds/Rocket shot.wav | |
+| MachineGun | ""(空文字) | 兵士の機関銃発射音(Step5-1)。音源探しはスコープ外 |
 | Whistle | rbxasset://sounds/Rocket whistle.wav | |
 | Beep | rbxasset://sounds/electronicpingshort.wav | |
 | NpcPop | rbxasset://sounds/snap.mp3 | |
@@ -461,11 +498,10 @@ GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 16+108 = 124
 
 `THREAT_DESIGN_PROPOSAL.md`の段階的実装順序(§6)に沿って、以下を意図的に未実装のまま保留している:
 
-- **警察ヘリ**(`Helicopter`。Step 5)
 - **戦車**(`Tank`。Step 6。建物破壊・`bonusPolicy="deny"`・貢献度クレジット方式もここで実装)
-- **★2・★3の`Config.Threat.Stages`エントリ**(未実装の敵種別を参照するため、実装が揃うまで登録しない)
+- **★3の`Config.Threat.Stages`エントリ**(未実装の敵種別Tankを参照するため、実装が揃うまで登録しない)
 - **`DestructionManager.Init`への`hudRemote`配線**(Step 6で戦車のボーナス奪取通知に使用)
-- **敵の`Movement`種別**: `"direct"`(直進。警官)・`"road"`(道路網走行。Step3のパトカーで実装済み)は実装済み。`"air"`(Step 5のヘリ用)は未実装
+- **敵の`Movement`種別**: `"direct"`(直進。警官・兵士)・`"road"`(道路網走行。Step3のパトカーで実装済み)は実装済み。ヘリはStep5-1で追加したが`Movement`種別としては実装していない(`EnemyTypes`に登録しない輸送演出専用オブジェクトのため。詳細は§14参照)
 - **レーダー(ミニマップ)**: 実装しない方針(頭上マーカー+画面端の方向インジケータの2本立てで代替)
 
 ---
@@ -597,10 +633,11 @@ Step 4dでバズーカの射程制限と同時に連射(押しっぱなし)も�
 引き継ぎ済みの課題。B+C案(閾値ベースの崩落+崩落分の減点)が推奨だが、A案(微小崩落)を実機で
 試して、浮いた構造物の見た目がどれだけ気になるかを先に判断する。
 
-### 11-4. `Helicopter` / `Tank`が未実装
+### 11-4. `Tank`が未実装(Step5-1完了により`Helicopter`は解消)
 
-`Config.lua`にはまだエントリが無い(`EnemyTypes`内にコメントで「Step5/Step6で追加する」と
-記載があるのみ)。**未実装の種別名を`Stages`に登録するとエラーになる。** ★2以降を有効化する際に、
+`Helicopter`はStep5-1で解決した(EnemyTypeとしては実装せず、輸送演出専用オブジェクトとして実装。詳細は§14参照)。
+`Tank`は`Config.lua`にまだエントリが無い(`EnemyTypes`内にコメントで「Step6で追加する」と記載があるのみ)。
+**未実装の種別名を`Stages`に登録するとエラーになる。** ★3を有効化する際に、
 `Config.Threat.EnemyTypes`への追加と`EnemyManager`側の対応実装(`Body`の妥当性チェック含む)が必要。
 
 ---
@@ -856,3 +893,140 @@ Step4dでバズーカが0.3秒間隔の連射になっても1発ごとに必ず�
 
 既存の呼び出し側2か所(`DeploySquad`内・`deployFromCar`内)はどちらも`spawnEnemy()`の戻り値を
 使用していないため、`nil`が返っても後続処理に影響しない。呼び出し側へのガード追加は行っていない。
+
+---
+
+## 14. Step 5-1 の設計判断(★2 軍用ヘリ輸送 + 兵士4人 + 機関銃5連射)
+
+★2(軍隊)を追加した。軍用ヘリは戦闘する敵ではなく、兵士4人を投入するための輸送演出専用オブジェクト。
+兵士は機関銃を5連射し、命中1発ごとに-0.5秒(5発全弾命中で-2.5秒)。`ThreatManager.lua`は無変更。
+
+### 14-1. ヘリは`Config.Threat.EnemyTypes`に登録しない
+
+ヘリは`workspace.EnemyTransports`(`EnemyManager`内で遅延生成する専用フォルダ)に生成し、
+`workspace.Enemies`にも`enemies`テーブルにも一切入れない。`CountAlive`・画面端▲・頭上「!」・
+`OnExplosion`の爆風判定・`killCounts`・スコアはすべて`workspace.Enemies`/`enemies`テーブルしか
+見ない設計になっているため、ヘリはこれらの対象に**自然に**含まれない(個別の除外条件を足す必要が無い)。
+
+### 14-2. ヘリ飛行中の`CountAlive==0`誤判定を`pendingDeployments`で防ぐ
+
+★2昇格からヘリが兵士を降ろすまでの数秒間、地上の生存者は0人になる。この間に既存の
+`ThreatManager.monitorLoop`が`CountAlive(currentSquadId) == 0`を検出すると、全滅済みと誤認して
+`RespawnDelay`後に別のヘリを二重に予約してしまう。
+
+これを防ぐため`EnemyManager`に`pendingDeployments[squadId] = 派遣中でまだ地上にいない数`を追加し、
+`CountAlive`は`pending + alive数`を返すようにした。加算は`deployByHelicopter()`内でどのyield
+(`task.wait`・`RunService.Heartbeat:Wait`)より前、完全に同期的に行う。減算は`spawnEnemy()`で
+個体を`enemies`テーブルへ登録した**直後**(同一フレーム内、間にyieldなし)に行うため、
+「pendingを先に減らしてから登録する」ことで生じる一瞬の0人窓は発生しない。
+`spawnEnemy()`が失敗を返した場合(理論上は`systemDisabled`時のみ発生しうる)も、その個体ぶんの
+pendingは必ず消費してwarnを出す。消費しないと残留したpendingにより`CountAlive`が永久に0にならず、
+以後の全滅判定・再派遣が起きなくなる事故につながるため。
+
+### 14-3. ヘリ輸送のキャンセル経路
+
+`activeTransports[model] = { squadId, cancelled }`で飛行中のヘリを追跡する。`RetreatSquad(squadId)`は
+該当するヘリを`cancelled=true`にしたうえで即`Destroy()`し、`pendingDeployments[squadId]`も
+`nil`にする(将来★3実装後、非同期処理の事故防止として。現状★2は通常プレイで発生しうる唯一のケース)。
+`heliFlyTo()`・兵士降下ループはいずれも、yieldから戻った直後・モデルに触れる前に
+`transport.cancelled`/`roundToken`を確認してから初めて操作するため、`Clear()`や`RetreatSquad()`が
+先にモデルを`Destroy()`していても、破棄済みインスタンスへ誤って触れることはない。
+`EnemyManager.Clear()`でも`pendingDeployments`・`activeTransports`・`transportFolder`をすべて破棄する。
+
+### 14-4. 兵士の降下状態
+
+`spawnEnemy()`に第4引数`options`(`{ deploying, deployFromY, suppressSpawnEffect }`)を追加した。
+既存呼び出し(第4引数省略)は完全に従来どおり動作する。`deploying=true`で生成された個体は
+`Deploying`属性・`CanQuery=false`・頭上マーカー`Enabled=false`になり、共有Heartbeatの`updateEnemy`は
+`enemy.deploying`を最優先でチェックして、垂直降下のみを行う`updateDeployingEnemy()`に分岐する
+(移動・標的選択・攻撃を行う`updateDirectEnemy()`には一切入らない)。
+
+`EnemyManager.OnExplosion()`(バズーカ等の爆風判定)にも`not enemy.deploying`のガードを追加した。
+`CanQuery=false`は直撃レイキャストしか防げず、爆風は距離だけで判定するため、これが無いと
+「降下中はバズーカの直撃対象にならない」が半分しか満たせない(直撃は防げるが、巻き添えの爆風は
+素通りしてしまう)。実装中に気づいて追加した対策。
+
+着地(`Y <= etype.SpawnY`)した瞬間に`CanQuery=true`・マーカー表示を復帰させ、
+`nextAttack`に`LandingAttackGrace`(0.8秒)を積んで着地直後の一斉射撃を防ぐ。画面端▲
+(`UIController.client.lua`)にも`model:GetAttribute("Deploying") ~= true`の条件を追加し、
+降下中は「!」・▲ともに非表示にした。
+
+`enemySpawn`の湧き演出(煙)は、`spawnEnemy()`側では`suppressSpawnEffect=true`で抑制し、
+`updateDeployingEnemy()`が着地を検出した時点で1回だけ発火する。抑制しないと、空中降下中なのに
+地上で湧き煙が先に出るという見た目の矛盾が生じるため。
+
+### 14-5. 5連射とタイム減少の一本化
+
+`AttackType`で分岐する(`etype.AttackType == "burst"`。敵タイプ名でのベタ書き分岐はしない)。
+既存の警官用`fireAttack`/`resolveAttack`(赤い`enemyAim`・単発判定)には一切手を加えていない。
+
+`fireBurst()`は対象プレイヤーを1人ロックし、`enemy.bursting`フラグで多重起動を防ぎながら
+`BurstInterval`(0.12秒)間隔で5発を発射する。各弾は`resolveBurstShot()`で「対象存在→Character→
+HumanoidRootPart→距離→LineOfSight」を毎回再判定し、命中/はずれいずれも新規エフェクト
+`enemyTracer`(黄色の曳光弾。赤い`enemyAim`は使わない)を出す。遮蔽物に当たった場合は
+`raycastMap()`のRaycast着弾点を曳光弾の終点にする(既存の`isBlocked()`はこの`raycastMap()`を
+呼ぶだけの薄いラッパーに整理し、警官のLOS判定の挙動・シグネチャは変えていない)。
+
+5発ぶんの命中数(`hitCount`)を集計し、バースト終了後に**1回だけ**`hitCount * TimePenalty`を
+既存`damagePlayer()`(`RoundClock.Add`を呼ぶ関数)に渡す。1発ごとに`RoundClock.Add`を呼ばないのは、
+5発が0.48秒に密集するため、タイマーフラッシュ・タイム音・フローティング表示が短時間に5連続で
+発火して読み取りづらくなるのを避けるため。
+
+ループは各弾の発射直前に`roundToken`変更・`enemy.alive==false`(この敵自身の撃破)・
+`aggressive==false`・対象プレイヤーの退出のいずれかを確認して即中断する。ループ後、
+`roundToken`が変わっていない、かつ`Retreating`属性が立っていない場合のみ蓄積ダメージを適用する。
+`Retreating`中(=旧部隊がStep5-0の撤退演出に入った)場合は蓄積ダメージを丸ごと破棄する。
+「撤退後は旧部隊からダメージを受けない」というStep5-0の原則を優先するため。
+
+`nextAttack`は警官と同じ意味を維持している: 攻撃"開始"時点(バースト開始時点)で
+`now + AttackInterval(3.0)`を積むだけで、バースト終了後に追加で3秒待つ実装にはしていない。
+これにより5連射(約0.48秒)+ 休止(約2.5秒)の周期になる。
+
+### 14-6. `ThreatManager.lua`は無変更
+
+`Config.Threat.Stages`へ2番目の要素(★2)を追加し、`DeploySquad`側に`entry.transport == "helicopter"`の
+分岐を足しただけで★1→★2の昇格が動く。これはStep5-0で敷いたデータ駆動設計(段階の追加が
+`ThreatManager`の変更を要求しない)が★2でも機能することの検証になっている。
+未知の`transport`文字列が指定された場合は`warn`してそのentryを無視する。通常スポーンへの
+黙示フォールバックはしない(「ヘリが出なかったのに兵士だけ出た」というサイレント失敗を防ぐため)。
+
+### 14-7. タイムUIの0.5秒表示
+
+`UIController.client.lua`の`spawnFloater()`は従来`math.round(delta)`で常に整数化していたが、
+兵士の1発0.5秒により非整数のタイム変化が発生するようになったため、`formatTimeDelta()`を新設した。
+整数(浮動小数の端数を含む場合も)は`"%+d秒"`、0.5刻みの値は`"%+.1f秒"`で表示する。
+タイマー本体(`RoundState`が送る`%d:%02d`の残り秒数表示)は変更していない。
+
+### 14-8. リザルトの撃破数表記
+
+兵士も`killCounts`に加算されるようになったため、リザルトの`(警察 N)`という表記が実情と
+合わなくなった。表示文字列のみ`(敵 N)`に変更した。内部データ構造(`killCounts`)は変更していない。
+
+### 14-9. モバイル操作方式(Step5-1プレイテスト後の改修)
+
+Step5-1実装後の実機プレイテストで、モバイルの「発射」ボタンが`aimCameraCenter()`(画面中央=カメラの向いている先)を使っていたため、真上視点では常にプレイヤーの足元付近へ発射される問題が判明した。これを2段階で修正した:
+
+1. 一度、モバイル照準を「世界タップ地点」に変更し、タップで即1発+「発射」ボタン長押しで最後のタップ地点へ連射、という方式を実装した
+2. その後の追加プレイテストで、この2段階方式は「発射ボタンの役割が薄く操作が複雑」と判断され、**モバイルの「発射」ボタン自体を完全に廃止**。ワールドタップ1回=1発に一本化した
+
+最終的な操作方式:
+
+| 操作 | PC | モバイル |
+|---|---|---|
+| 攻撃 | クリック(`Mouse.Hit.Position`) | 3Dワールドをタップした地点(`Camera:ScreenPointToRay()`→`Raycast`) |
+| バズーカの連射 | 押しっぱなしで0.3秒間隔(`AutoFire`) | **無し(1タップ1発のみ)**。将来必要になればプレイテストで判断する |
+| エアストライク/リモート爆弾 | クリック地点が対象 | タップ地点が対象(単発なので挙動はPCと同じ) |
+| リモート爆弾の起爆 | Fキー | 「起爆」ボタン(位置は`UDim2.new(1,-20,1,-130)`。右下隅(`-20,-20`)だとRoblox標準ジャンプボタンと重なるため、旧モバイル「発射」ボタンがあった位置へ移動。§14-10参照) |
+| 武器切替 | 数字キー1/2/3 | 武器スロットのタップ |
+
+**入力経路の使い分け**: PCのクリックは`Tool.Activated`(→`aimMouse`→`Mouse.Hit.Position`)、モバイルのワールドタップは`UserInputService.TouchTapInWorld`(→`raycastFromScreenPoint`→`Camera:ScreenPointToRay()`)という別々の経路を使う。`TouchTapInWorld`は`processedByUI`引数でUI(武器スロット・起爆ボタン・移動スティック)に処理されたタップを自動的に除外し、カメラドラッグはタップ操作ではないためこのイベント自体が発火しない。
+
+**PC/モバイル二重発火の防止**: タッチ対応デバイスでは`Tool.Activated`もタップに反応して発火しうるため、`child.Activated`のコールバック内で`UserInputService:GetLastInputType() == Enum.UserInputType.Touch`を確認し、直前の入力がタッチ由来なら何もせず`TouchTapInWorld`側に処理を委ねる。`UserInputService.TouchEnabled`(端末がタッチ対応かどうかの静的フラグ)で判定しない理由は、タッチ対応PCでは常にtrueになり、そのPCのマウスクリックまで無効化されてしまうため。`GetLastInputType()`は入力のたびに動的に判定できるため、同じ端末上でもマウスとタッチを正しく振り分けられる。
+
+**廃止したもの**: モバイル「発射」ボタン一式(`fireBtn`/`activeInput`/`beginFire`/`endFire`)、`WeaponClientEvents`の`FireRequest`/`FireRelease`/`MobileAimMissing`、`lastMobileAimPos`(照準地点の保存)、`aimCameraCenter()`(カメラ中央照準。前回改修より前から存在した仕組み)。
+
+### 14-10. 起爆ボタンの位置修正 + 装備中武器スロットの視認性改善(プレイテスト後の追加修正)
+
+§14-9で起爆ボタンを右下隅(`UDim2.new(1,-20,1,-20)`)へ移動したが、スマホ実機ではRoblox標準のジャンプボタンと重なることが判明した。旧モバイル「発射」ボタンがあった位置(`UDim2.new(1,-20,1,-130)`)は「右手親指で押しやすい」「ジャンプボタンより上に逃げる」「下部中央の武器スロットと水平方向に十分離れている」という実績があったため、起爆ボタンをその位置へ再移動した。サイズ(`100×60`)・表示文字・色・`Visible`制御・`DetonateRequest`・Fキー起爆はすべて無変更。
+
+あわせて、装備中の武器スロットが「黄色3pxの枠」だけではスマホ実機で目立たなかったため、装備中の見た目を「ほぼ黒(`Color3.fromRGB(8,8,10)`・`Transparency=0.05`)背景 + 黄色5px枠」に強調した。未装備スロットの見た目(`Color3.fromRGB(30,30,35)`・`Transparency=0.3`・黄色枠OFF)は変更していない。両状態の色・透明度・枠太さは`UIController.client.lua`内のローカル定数(`SLOT_NORMAL_*`/`SLOT_SELECTED_*`)に集約し、スロット生成時と`WeaponSelected`受信時の両方が同じ定数を参照する(初期生成時と装備解除時で通常色がズレる事故を防ぐため)。クールダウン中の暗転`overlay`は無変更で、装備中の黄色太枠と共存する(`overlay`が枠を完全に隠す構造にはなっていないため、ZIndexは変更していない)。

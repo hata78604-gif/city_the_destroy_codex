@@ -337,6 +337,20 @@ Config.Threat = {
 		Jitter = 6,
 	},
 
+	-- ▼ 軍用ヘリ輸送(Step5-1)。ヘリ自体はEnemyTypesに登録しない(戦闘する敵ではなく輸送演出専用)
+	HelicopterTransport = {
+		Altitude = 75, -- 高層建物との衝突を避けつつ、地上からヘリを視認できる高さ
+		CruiseSpeed = 80, -- ★昇格後、数秒程度で投下地点へ到着させる
+		ExitSpeed = 90, -- 投下後は演出を長引かせず素早く離脱
+		EntryMargin = 80, -- 街外から飛来していることが視覚的に分かる距離
+
+		DropInterval = 0.18, -- 4人が完全同時ではなく、短い間隔で順番に降りる
+		DescendSpeed = 70, -- 高度75から約1秒前後で地面へ到達
+		DropOffsetY = 6, -- ヘリ本体の中央からではなく下部から降下して見えるようにする
+		LandingSpread = 6, -- 道路幅16の半分8より小さくし、道路外へ飛び出しにくくする
+		LandingAttackGrace = 0.8, -- 着地した瞬間に4人が一斉射撃する理不尽感を防ぐ
+	},
+
 	-- ▼ 視認性
 	Marker = {
 		Enabled = true,
@@ -422,12 +436,42 @@ Config.Threat = {
 			-- 大きくないと曲がり角を回り続ける。MoveSpeedやTurnDurationを変えたらここも見直すこと
 			WaypointRadius = 10,
 		},
-		-- Helicopter は Step 5、Tank は Step 6 で追加する。
-		-- 未実装の種別を Stages から参照するとエラーになるため、ここにも書かない
+		-- Tank は Step 6 で追加する。未実装の種別を Stages から参照するとエラーになるため、ここにも書かない
+		Soldier = {
+			DisplayName = "兵士",
+			Body = "human", -- PoliceOfficerと同じ人型の組み立て(buildHumanBody)を使う
+
+			BodyColors = {
+				Shirt = Color3.fromRGB(72, 82, 55),
+				Pants = Color3.fromRGB(58, 64, 45),
+			},
+
+			Hits = 1, -- HPを増やしてクリック疲れで難易度を作らない既存方針を維持(HANDOFF.md §6)
+			HitCooldown = 0.25,
+
+			Movement = "direct",
+			ApproachSpeed = 20, -- まず警官と同じ移動性能にし、兵士との差を攻撃方式だけに限定する
+			MoveSpeed = 13,
+			StopDistance = 80,
+
+			AttackType = "burst", -- EnemyManagerはAttackTypeで分岐する(敵タイプ名のベタ書き分岐はしない)
+			AttackRange = 100, -- バズーカ射程140より短く、反撃可能
+			AttackInterval = 3.0, -- バースト"開始"から次のバースト"開始"までの間隔。5連射(約0.48秒)+ 休止(約2.5秒)
+			BurstCount = 5, -- ユーザー決定
+			BurstInterval = 0.12, -- 5発が約0.48秒で終わり「ダダダダダ」と認識できる速度
+
+			TimePenalty = 0.5, -- ユーザー決定。全弾命中で-2.5秒
+
+			ScoreReward = 400, -- 暫定値。最終スコア設計が決まるまで意味を持たせすぎない
+			TimeReward = 0, -- 「敵はタイムを配らない」という現行方針を維持(HANDOFF.md §6)
+
+			Parts = 6, -- パーツ予算の見積り用(コードは参照しない)
+			SpawnY = 3, -- PoliceOfficerと同じ人型なので同じ接地Y座標を採用
+		},
 	},
 
 	-- ▼ 段階(配列。順序が段階の順序。★4は末尾に1エントリ足すだけで動く設計)
-	-- ★2・★3は未実装の敵種別を参照するため、今回は書かない
+	-- ★3は未実装の敵種別(Tank)を参照するため、今回は書かない
 	Stages = {
 		{
 			Name = "★1 警察",
@@ -440,6 +484,17 @@ Config.Threat = {
 			Squad = {
 				{ type = "PoliceCar", count = 2 },
 				{ type = "PoliceOfficer", count = 2 }, -- Step3最終編成: パトカー2台 + 警官2人(残りはパトカーが輸送)
+			},
+		},
+		{
+			Name = "★2 軍隊",
+			-- 暫定値。最終クリア条件・★3以降・スコア進行設計確定後に再調整
+			Threshold = 4000,
+			Telop = "軍が出動した!",
+			Sound = "Siren",
+			RespawnDelay = 20,
+			Squad = {
+				{ type = "Soldier", count = 4, transport = "helicopter" },
 			},
 		},
 	},
@@ -462,6 +517,7 @@ Config.Sounds = {
 	EnemyDown = "", -- 敵の撃破音
 	EnemyDeploy = "", -- パトカーの降車演出音(手順7。空文字=鳴らない)
 	Jet = "", -- 戦闘機の飛行音(Step4c。空文字=鳴らない)
+	MachineGun = "", -- 兵士の機関銃発射音(Step5-1。空文字=鳴らない。音源探しはスコープ外)
 }
 
 -- ▼ RemoteEvent 名(GameManagerが起動時に自動生成する) ----------------

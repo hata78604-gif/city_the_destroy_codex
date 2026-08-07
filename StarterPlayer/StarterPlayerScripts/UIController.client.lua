@@ -17,7 +17,6 @@
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
-local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
 
@@ -27,6 +26,7 @@ local readyRemote = remotes:WaitForChild("Ready")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
+local camera = workspace.CurrentCamera
 
 -- WeaponClient が作る連携イベント(入力依頼の送り先)
 local weaponEvents = script.Parent:WaitForChild("WeaponClientEvents")
@@ -165,8 +165,99 @@ local chainLabel = makeLabel(hud, {
 })
 
 --------------------------------------------------------------------
+-- HUDレスポンシブ配置(スマホ横画面対応)
+--
+-- scoreLabel/chainLabelは「画面右端から200pxオフセット」の絶対位置指定のため、
+-- timerLabel(中央、幅260)との間隔は画面幅が狭くなるほど縮む。計算上、
+-- 幅1100px未満では必ず重なりが発生する(例: 幅1024pxで約38px、幅900pxで約100px重複)。
+-- そのためこの1100pxを「コンパクト配置に切り替える」閾値として採用する。
+-- TouchEnabledでは判定しない(PC/タブレットのウィンドウが狭い場合も同じ問題が起きるため)。
+--
+-- コンパクト時は縦積みにはしない(中央テロップ Position.Y=0.35 との衝突を避けるため)。
+-- 代わりに threatLabel=左上 / timerLabel=中央上(変更なし) / scoreLabel=右上(端寄せ) /
+-- chainLabel=scoreLabelの直下、という「上段の帯(高さ約90px)」に収める配置にする
+--------------------------------------------------------------------
+local COMPACT_VIEWPORT_WIDTH = 1100
+
+local HUD_LAYOUT = {
+	wide = {
+		threat = {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(0.5, -140, 0, 32),
+			Size = UDim2.fromOffset(120, 32),
+			TextXAlignment = Enum.TextXAlignment.Right,
+		},
+		score = {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -200, 0, 8),
+			Size = UDim2.fromOffset(220, 40),
+			TextXAlignment = Enum.TextXAlignment.Right,
+		},
+		chain = {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -200, 0, 52),
+			Size = UDim2.fromOffset(220, 44),
+			TextXAlignment = Enum.TextXAlignment.Right,
+		},
+	},
+	compact = {
+		threat = {
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0, 10, 0, 30),
+			Size = UDim2.fromOffset(130, 30),
+			TextXAlignment = Enum.TextXAlignment.Left,
+		},
+		score = {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -10, 0, 8),
+			Size = UDim2.fromOffset(160, 34),
+			TextXAlignment = Enum.TextXAlignment.Right,
+		},
+		chain = {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -10, 0, 46),
+			Size = UDim2.fromOffset(160, 36),
+			TextXAlignment = Enum.TextXAlignment.Right,
+		},
+	},
+}
+
+local function applyLabelProps(label, props)
+	for k, v in props do
+		label[k] = v
+	end
+end
+
+local isCompactHud = nil -- nil=未適用。適用済みモードと同じなら何もしない(不要な再代入を避ける)
+local function refreshHudLayout()
+	local compact = camera.ViewportSize.X < COMPACT_VIEWPORT_WIDTH
+	if compact == isCompactHud then
+		return
+	end
+	isCompactHud = compact
+	local layout = if compact then HUD_LAYOUT.compact else HUD_LAYOUT.wide
+	applyLabelProps(threatLabel, layout.threat)
+	applyLabelProps(scoreLabel, layout.score)
+	applyLabelProps(chainLabel, layout.chain)
+end
+
+camera:GetPropertyChangedSignal("ViewportSize"):Connect(refreshHudLayout)
+refreshHudLayout() -- 初期表示にも適用する
+
+--------------------------------------------------------------------
 -- 武器スロット(画面下部中央)クリック / タップで武器切替
 --------------------------------------------------------------------
+-- 装備中スロットの強調表示(スマホ実機で黄色3px枠だけでは目立たなかったため。改修④)。
+-- 生成時の通常背景とWeaponSelected時の切り替えの両方がこの定数を参照することで、
+-- 「初期生成時と装備解除時で通常色がズレる」事故を防ぐ
+local SLOT_NORMAL_COLOR = Color3.fromRGB(30, 30, 35)
+local SLOT_NORMAL_TRANSPARENCY = 0.3
+local SLOT_NORMAL_STROKE_THICKNESS = 3
+local SLOT_SELECTED_COLOR = Color3.fromRGB(8, 8, 10) -- 完全な黒(0,0,0)より僅かに明るくし、立体感を完全には潰さない
+local SLOT_SELECTED_TRANSPARENCY = 0.05 -- ほぼ不透明にして未装備の0.3との差を明確にする
+local SLOT_SELECTED_STROKE_THICKNESS = 5 -- 90x90のスロットに対して十分目立つが、枠がスロットを占領するほど太くはない
+local SLOT_STROKE_COLOR = Color3.fromRGB(255, 220, 80)
+
 local slotsFrame = Instance.new("Frame")
 slotsFrame.AnchorPoint = Vector2.new(0.5, 1)
 slotsFrame.Position = UDim2.new(0.5, 0, 1, -12)
@@ -186,8 +277,8 @@ for _, key in Config.WeaponOrder do
 
 	local button = Instance.new("TextButton")
 	button.Size = UDim2.fromOffset(90, 90)
-	button.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
-	button.BackgroundTransparency = 0.3
+	button.BackgroundColor3 = SLOT_NORMAL_COLOR
+	button.BackgroundTransparency = SLOT_NORMAL_TRANSPARENCY
 	button.Text = ""
 	button.Parent = slotsFrame
 	local corner = Instance.new("UICorner")
@@ -196,8 +287,8 @@ for _, key in Config.WeaponOrder do
 
 	-- 装備中ハイライト用の枠
 	local stroke = Instance.new("UIStroke")
-	stroke.Thickness = 3
-	stroke.Color = Color3.fromRGB(255, 220, 80)
+	stroke.Thickness = SLOT_NORMAL_STROKE_THICKNESS
+	stroke.Color = SLOT_STROKE_COLOR
 	stroke.Enabled = false
 	stroke.Parent = button
 
@@ -250,10 +341,16 @@ for _, key in Config.WeaponOrder do
 	slots[key] = { button = button, overlay = overlay, cdText = cdText, stroke = stroke, sub = sub }
 end
 
--- 装備中の武器のハイライト(WeaponClientからの通知で更新)
+-- 装備中の武器のハイライト(WeaponClientからの通知で更新)。
+-- 「黒背景+黄色太枠」と「通常背景+枠OFF」を同じ定数から切り替えるため、
+-- 型名やスロット番号のベタ書き分岐は行わない
 weaponEvents.WeaponSelected.Event:Connect(function(currentKey)
 	for key, slot in slots do
-		slot.stroke.Enabled = (key == currentKey)
+		local selected = key == currentKey
+		slot.stroke.Enabled = selected
+		slot.stroke.Thickness = if selected then SLOT_SELECTED_STROKE_THICKNESS else SLOT_NORMAL_STROKE_THICKNESS
+		slot.button.BackgroundColor3 = if selected then SLOT_SELECTED_COLOR else SLOT_NORMAL_COLOR
+		slot.button.BackgroundTransparency = if selected then SLOT_SELECTED_TRANSPARENCY else SLOT_NORMAL_TRANSPARENCY
 	end
 end)
 
@@ -278,51 +375,16 @@ local function makeActionButton(text, position, size, color)
 	return btn
 end
 
--- 起爆ボタン(爆弾を設置しているときだけ表示。PC/モバイル共通)
+-- 起爆ボタン(爆弾を設置しているときだけ表示。PC/モバイル共通)。
+-- 改修④: 右下隅(-20,-20)だとスマホ実機でRoblox標準ジャンプボタンと重なったため、
+-- 旧モバイル発射ボタンがあった位置(-20,-130)へ移動した。ジャンプボタンより上に逃げつつ、
+-- 下部中央の武器スロット(幅300)とは水平方向に十分離れている
 local detonateBtn = makeActionButton("起爆",
-	UDim2.new(1, -20, 1, -240), UDim2.fromOffset(100, 60), Color3.fromRGB(200, 60, 40))
+	UDim2.new(1, -20, 1, -130), UDim2.fromOffset(100, 60), Color3.fromRGB(200, 60, 40))
 detonateBtn.Visible = false
 detonateBtn.Activated:Connect(function()
 	weaponEvents.DetonateRequest:Fire()
 end)
-
--- 発射ボタン(タッチ端末のみ)。押しっぱなし対応(Step4d)。
--- Activated(離した瞬間に1回だけ発火)では連射を表現できないため、
--- InputBegan/InputEndedで押下中かどうかを自前で追う。
--- ボタン自身のInputEndedだけに頼ると、指がボタンの外にスライドして離れた場合に
--- 拾えないことがあるため、UserInputService.InputEnded側でも同じInputObjectの
--- 終了を監視する(押しっぱなしのまま止まらなくなる事故を防ぐ)
-if UserInputService.TouchEnabled then
-	local fireBtn = makeActionButton("発射",
-		UDim2.new(1, -20, 1, -130), UDim2.fromOffset(100, 100), Color3.fromRGB(230, 140, 30))
-
-	local activeInput = nil -- 現在「発射中」を維持しているInputObject
-
-	local function beginFire(input)
-		if activeInput then
-			return -- 既に別の指/クリックで発射中なら二重に開始しない
-		end
-		activeInput = input
-		weaponEvents.FireRequest:Fire()
-	end
-
-	local function endFire(input)
-		if activeInput ~= input then
-			return
-		end
-		activeInput = nil
-		weaponEvents.FireRelease:Fire()
-	end
-
-	fireBtn.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.Touch
-			or input.UserInputType == Enum.UserInputType.MouseButton1 then
-			beginFire(input)
-		end
-	end)
-	fireBtn.InputEnded:Connect(endFire)
-	UserInputService.InputEnded:Connect(endFire)
-end
 
 --------------------------------------------------------------------
 -- リザルト画面
@@ -444,10 +506,11 @@ local function showResult(data)
 			child:Destroy()
 		end
 	end
-	-- 順位。撃破数は0でも「(警察 0)」と出す(欠落と区別できないようにするため)
+	-- 順位。撃破数は0でも「(敵 0)」と出す(欠落と区別できないようにするため)。
+	-- Step5-1で兵士もkillCountsに入るようになったため「警察」から「敵」に変更(§30)
 	for rank, entry in ipairs(data.ranking) do
 		local color = if rank == 1 then Color3.fromRGB(255, 220, 80) else nil
-		addRow(("%d位  %s  %d点  (警察 %d)"):format(rank, entry.name, entry.score, entry.kills or 0), 36, color)
+		addRow(("%d位  %s  %d点  (敵 %d)"):format(rank, entry.name, entry.score, entry.kills or 0), 36, color)
 	end
 	-- サマリー行
 	local summary = data.buildingSummary or { destroyedCount = 0, totalCount = 0, overallRate = 0 }
@@ -583,19 +646,28 @@ local function flashTimer(isGain)
 	end)
 end
 
+-- タイム表示のフォーマット(Step5-1)。RoundClock.Addの戻り値(applied)はfloat演算の結果なので、
+-- 9.999999999999998や1.4999999999999998のような端数が乗ることがある。
+-- 兵士の5連射(1発0.5秒)導入により0.5秒刻みの値が来るようになったため、整数はこれまでどおり
+-- "%+d秒"、0.5刻みは"%+.1f秒"で表示する(浮動小数の端数は%dの丸め判定にも%.1fの表示にも
+-- 影響しない範囲に収まる)
+local function formatTimeDelta(delta)
+	local rounded = math.round(delta)
+	if math.abs(delta - rounded) < 0.001 then
+		return ("%+d秒"):format(rounded)
+	end
+	return ("%+.1f秒"):format(delta)
+end
+
 -- 「+10秒!」フローティング表示。timerLabelの直下(y=60)に生成し、上へ40px移動しながら消える。
 -- ZIndex=0にして既定値(1)のtimerLabelより背面に置く(移動先y=20でtimerLabelと重なるため。
 -- これが無いとフェード中の数字が読めなくなる)
 local function spawnFloater(delta)
-	-- RoundClock.Addの戻り値(applied)はfloat減算の結果なので、9.999999999999998のような
-	-- 端数が乗ることがある。%dフォーマットの安全のためmath.roundで整数化する
-	-- (math.absは使わない。符号を残すため)
-	local rounded = math.round(delta)
 	local floater = makeLabel(hud, {
 		AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0, 60),
 		Size = UDim2.fromOffset(200, 32),
-		Text = ("%+d秒"):format(rounded),
+		Text = formatTimeDelta(delta),
 		TextColor3 = if delta > 0 then Color3.fromRGB(120, 255, 140) else Color3.fromRGB(255, 90, 90),
 		ZIndex = 0,
 	})
@@ -673,7 +745,7 @@ end
 do
 	local indicatorCfg = Config.Threat.Indicator
 	if indicatorCfg and indicatorCfg.Enabled then
-		local camera = workspace.CurrentCamera
+		-- cameraは上部で宣言済みのモジュール共通変数を使う(HUDレスポンシブ配置と同じ参照)
 		local pool = {}
 		for _ = 1, indicatorCfg.PoolSize do
 			local arrow = makeLabel(hud, {
@@ -700,8 +772,10 @@ do
 			local candidates = {}
 
 			for _, model in enemiesFolder:GetChildren() do
-				-- 死体(Dead=true)には▲を出さない。生成途中(PrimaryPart未設定)も除外
-				if model:GetAttribute("Dead") ~= true and model.PrimaryPart then
+				-- 死体(Dead=true)には▲を出さない。生成途中(PrimaryPart未設定)も除外。
+				-- ヘリ降下中(Deploying=true。Step5-1)も対象外にする(「!」と同じく降下完了まで隠す)
+				if model:GetAttribute("Dead") ~= true and model:GetAttribute("Deploying") ~= true
+					and model.PrimaryPart then
 					local pos = model.PrimaryPart.Position
 					local dist = (camera.CFrame.Position - pos).Magnitude
 					if dist <= indicatorCfg.MaxDistance then

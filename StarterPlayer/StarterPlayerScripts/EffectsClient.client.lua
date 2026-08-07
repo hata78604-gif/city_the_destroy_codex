@@ -272,6 +272,32 @@ local function onEnemyAim(data)
 	end)
 end
 
+-- 兵士の機関銃曳光弾(Step5-1)。赤いenemyAimとは別の見た目(黄色系・細い・短時間)にすることで
+-- 「軽い弾幕」と「重い一撃」を区別する。命中/はずれ/遮蔽のいずれもこの1つで表現する(§20-21)。
+-- 生成するInstanceは1個だけで、必ず短時間でDestroyする
+local function onEnemyTracer(data)
+	local from, to = data.from, data.to
+	local dist = (to - from).Magnitude
+	local mid = (from + to) / 2
+	local tracer = Instance.new("Part")
+	tracer.Size = Vector3.new(0.1, 0.1, dist)
+	tracer.CFrame = CFrame.new(mid, to)
+	tracer.Color = Color3.fromRGB(255, 240, 150) -- 薄黄色
+	tracer.Material = Enum.Material.Neon
+	tracer.Anchored = true
+	tracer.CanCollide = false
+	tracer.CanQuery = false
+	tracer.CastShadow = false
+	tracer.Parent = fxFolder
+
+	-- 5発が0.48秒に密集するため、Explosionと同じ0.02秒デデュープで音の団子化を防ぐ
+	playSound(Config.Sounds.MachineGun, from, 0.5, 1, 0.02)
+
+	task.delay(0.08, function()
+		tracer:Destroy()
+	end)
+end
+
 -- 被弾: 既存の被弾音(TimeLoss) + 軽いカメラシェイク
 local function onEnemyShotHit(data)
 	playSound(Config.Sounds.TimeLoss, data.position, 0.8, 1)
@@ -357,6 +383,8 @@ effectRemote.OnClientEvent:Connect(function(effectType, data)
 		onEnemySpawn(data)
 	elseif effectType == "enemyAim" then
 		onEnemyAim(data)
+	elseif effectType == "enemyTracer" then
+		onEnemyTracer(data)
 	elseif effectType == "enemyShotHit" then
 		onEnemyShotHit(data)
 	elseif effectType == "enemyShotMiss" then

@@ -41,6 +41,11 @@ local cityBounds = 0 -- 街の外周座標の絶対値。roadLines[#roadLines]�
 -- 再利用されたときに誤って撤退済み扱いになる
 local retiredSquads = {}
 
+-- 撤退中の地上個体(Step5-2)。retreatingEnemies[model] = { model, core, dir, startedAt }。
+-- enemiesテーブルからは既に外れている(CountAlive/OnExplosion/攻撃/被弾の対象外にするため)。
+-- Heartbeatでaggressiveに関係なく毎フレーム更新し、街外周を抜けたらDestroyする
+local retreatingEnemies = {}
+
 -- ヘリ輸送(Step5-1)。squadId=>まだ地上にいないが派遣中の数。CountAliveに加算することで
 -- 「ヘリ飛行中は生存0体」の誤判定(全滅済みと誤認されて余分な再派遣が起きる)を防ぐ
 local pendingDeployments = {}
@@ -911,13 +916,89 @@ local function updateEnemy(enemy, dt)
 	end
 end
 
-RunService.Heartbeat:Connect(function(dt)
-	if not aggressive then
+--------------------------------------------------------------------
+-- 撤退中の地上個体の移動(Step5-2)。EnemyManager.RetreatSquadが登録し、Heartbeatが
+-- aggressiveに関係なく毎フレーム呼ぶ(下記Heartbeat参照)
+--------------------------------------------------------------------
+
+-- 撤退方向。現在位置から街の4辺(+X/-X/+Z/-Z、cityBounds基準)のうち
+-- 最も近い方向を選び、単位ベクトルを返す
+local function computeRetreatDirection(pos)
+	local candidates = {
+		{ dist = cityBounds - pos.X, dir = Vector3.new(1, 0, 0) },
+		{ dist = pos.X + cityBounds, dir = Vector3.new(-1, 0, 0) },
+		{ dist = cityBounds - pos.Z, dir = Vector3.new(0, 0, 1) },
+		{ dist = pos.Z + cityBounds, dir = Vector3.new(0, 0, -1) },
+	}
+	local best = candidates[1]
+	for _, c in candidates do
+		if c.dist < best.dist then
+			best = c
+		end
+	end
+	return best.dir
+end
+
+-- 撤退の安全弁。降下中兵士の撤退、およびMaxDuration超過個体だけがここを通る。
+-- 呼び出し側は必ず先にretreatingEnemies[model]=nilしてから呼ぶこと。1モデルにつき
+-- Tween/task.delayを1回しか作らないことがこの前提で保証される(二重生成防止)
+local function startFallbackFade(model)
+	local token = roundToken
+	for _, part in model:GetChildren() do
+		if part:IsA("BasePart") then
+			TweenService:Create(part,
+				TweenInfo.new(Config.Threat.Retreat.FallbackFadeTime, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
+				{ Transparency = 1 }):Play()
+		end
+	end
+	task.delay(Config.Threat.Retreat.FallbackFadeTime, function()
+		if roundToken ~= token then
+			return
+		end
+		if model.Parent then
+			model:Destroy()
+		end
+	end)
+end
+
+-- 撤退中の地上個体を毎フレーム更新する。MaxDuration超過はstartFallbackFadeへ切替、
+-- cityBounds+ExitMarginを超えたら即Destroyする。いずれの分岐も、後続処理より先に
+-- retreatingEnemies[model]=nilする(同じモデルが次フレーム以降も再処理されるのを防ぐ)
+local function updateRetreatingEnemy(model, record, dt)
+	if os.clock() - record.startedAt > Config.Threat.Retreat.MaxDuration then
+		retreatingEnemies[model] = nil
+		startFallbackFade(model)
 		return
 	end
-	for model, enemy in enemies do
-		if enemy.alive and model.Parent then
-			updateEnemy(enemy, dt)
+
+	local pos = record.core.Position
+	local newPos = pos + record.dir * Config.Threat.Retreat.Speed * dt
+	model:PivotTo(CFrame.lookAt(newPos, newPos + record.dir))
+
+	local exitBoundary = cityBounds + Config.Threat.Retreat.ExitMargin
+	if math.abs(newPos.X) > exitBoundary or math.abs(newPos.Z) > exitBoundary then
+		retreatingEnemies[model] = nil
+		if model.Parent then
+			model:Destroy()
+		end
+	end
+end
+
+RunService.Heartbeat:Connect(function(dt)
+	if aggressive then
+		for model, enemy in enemies do
+			if enemy.alive and model.Parent then
+				updateEnemy(enemy, dt)
+			end
+		end
+	end
+	-- 撤退中の地上個体(Step5-2)はaggressiveに関係なく毎フレーム更新する(仕様どおり)。
+	-- ラウンド終了(SetAggressive(false))後も撤退移動自体は止めず、街外周へ抜けさせてから消す
+	for model, record in retreatingEnemies do
+		if model.Parent then
+			updateRetreatingEnemy(model, record, dt)
+		else
+			retreatingEnemies[model] = nil
 		end
 	end
 end)
@@ -1280,7 +1361,8 @@ function EnemyManager.DeploySquad(squadId, squadList)
 end
 
 --------------------------------------------------------------------
--- 撤退処理(Step5-0)。危険度昇格時に前段階の部隊をその場で行動停止させ、フェードアウトさせる。
+-- 撤退処理(Step5-0→Step5-2で演出変更)。危険度昇格時に前段階の部隊をゲーム上即座に無効化し、
+-- 地上の敵は最寄りの街外周へ高速移動させたのち、街の外に出たらDestroyする。
 -- 撤退は撃破ではない: killEnemy()は呼ばない。スコア・タイム・撃破数・撃破演出・死体は発生させない
 --------------------------------------------------------------------
 function EnemyManager.RetreatSquad(squadId)
@@ -1313,7 +1395,7 @@ function EnemyManager.RetreatSquad(squadId)
 	for _, entry in toRetreat do
 		local model, enemy = entry.model, entry.enemy
 
-		-- alive=falseはフェード開始前に設定する。これにより既に予約済みのテレグラフ攻撃も
+		-- alive=falseはこの時点で設定する。これにより既に予約済みのテレグラフ攻撃も
 		-- resolveAttack()の既存enemy.aliveチェックで無効になる(§8-1)
 		enemy.alive = false
 		model:SetAttribute("Retreating", true)
@@ -1329,22 +1411,25 @@ function EnemyManager.RetreatSquad(squadId)
 			if part:IsA("BasePart") then
 				part.CanQuery = false -- バズーカのレイキャストをすり抜けさせる
 				part.CanCollide = false
-				TweenService:Create(part,
-					TweenInfo.new(Config.Threat.Retreat.FadeTime, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
-					{ Transparency = 1 }):Play()
 			end
 		end
 
-		enemies[model] = nil -- 以降Heartbeatループ(updateEnemy)の対象外になる
+		-- 以降updateEnemy(通常のHeartbeatループ)の対象外になる。CountAlive/OnExplosion/攻撃/被弾/
+		-- スコア/タイム/撃破数/「!」/▲はいずれもenemiesテーブルしか見ないため、この時点で自動的に対象外になる
+		enemies[model] = nil
 
-		-- Destroy予約は1モデルにつき1本だけ(パーツごとにCompleted:Connect()しない)。
-		-- ラウンド終了でClear()がfolderごと先に破棄している場合があるため、
-		-- 消滅済みモデルへ二重にDestroy()しないようmodel.Parentを確認する(§8-6)
-		task.delay(Config.Threat.Retreat.FadeTime, function()
-			if model.Parent then
-				model:Destroy()
-			end
-		end)
+		if enemy.deploying then
+			-- 降下中は高速移動させず、ゲーム上無効化した状態のままFallbackFadeTimeで消す(§4)
+			startFallbackFade(model)
+		else
+			-- 地上の敵だけ、最寄りの街外周へ向けて高速移動させる(Step5-2)
+			retreatingEnemies[model] = {
+				model = model,
+				core = enemy.core,
+				dir = computeRetreatDirection(enemy.core.Position),
+				startedAt = os.clock(),
+			}
+		end
 	end
 
 	if Config.Threat.DebugLog then
@@ -1388,6 +1473,12 @@ function EnemyManager.Clear()
 		model:Destroy()
 	end
 	table.clear(enemies)
+	for model in retreatingEnemies do -- 撤退中モデルの明示的な削除(Step5-2)
+		if model.Parent then
+			model:Destroy()
+		end
+	end
+	table.clear(retreatingEnemies)
 	table.clear(playerState)
 	table.clear(killCounts) -- RESULTでGetKillCounts()を読み終えた後のLOBBYで呼ばれるので、順序は問題ない
 	table.clear(retiredSquads) -- 次ラウンドでsquadIdが1から再利用されるため必須(Step5-0)

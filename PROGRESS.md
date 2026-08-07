@@ -657,3 +657,59 @@ Step5-1実装後の実機プレイテストで判明した2件の問題(HUD重�
   - バズーカ/エアストライク/リモート爆弾を装備したとき、対応するスロットだけが黒背景+黄色太枠になること
   - 武器をしまったとき全スロットが通常表示に戻ること
   - エアストライクのクールダウン中でも装備中であることが黄色太枠で判別できること
+
+# 旧部隊の撤退演出改善(Step 5-2。2026-08-07)
+
+## 目的
+
+Step5-0の撤退演出(危険度昇格時、旧部隊がその場でフェード消滅)を、
+「ゲーム上は即無効化 → 最寄りの街外周へ高速移動 → 街の外へ出たらDestroy」に変更した。
+§13-2で確定した即無効化(`enemy.alive=false`・`Retreating`/`Dead`属性・マーカー/被弾フラッシュOFF・
+`CanQuery`/`CanCollide`OFF・`enemies`テーブルからの除去)は無変更(`CURRENT_SPEC.md` §15参照)。
+
+## 実装したもの
+
+### `Config.lua`
+
+`Config.Threat.Retreat`の`FadeTime`(全個体共通の即時フェード秒数)を廃止し、
+`Speed`(45)/`ExitMargin`(25)/`MaxDuration`(8)/`FallbackFadeTime`(0.4)に置き換えた。
+`FadeTime`は`EnemyManager.lua`以外から参照されていないことを確認済み。
+
+### `EnemyManager.lua`
+
+- `retreatingEnemies`テーブルを新設(`retreatingEnemies[model] = { model, core, dir, startedAt }`)
+- `RetreatSquad()`: 既存の即無効化処理はそのまま。降下中の兵士(`enemy.deploying`)だけ従来どおり
+  その場でフェード(`startFallbackFade()`。`FallbackFadeTime`使用)させ、地上の敵は
+  `retreatingEnemies`へ登録する。撤退方向は現在位置から街の4辺(`+X`/`-X`/`+Z`/`-Z`、`cityBounds`
+  基準)のうち最も近い方を選ぶ(`computeRetreatDirection()`)
+- `Heartbeat`: 通常の`enemies`は従来どおり`aggressive`のときだけ更新、`retreatingEnemies`は
+  `aggressive`に関係なく毎フレーム更新するよう分岐を追加
+- `updateRetreatingEnemy()`: `Speed*dt`で直進し、`cityBounds+ExitMargin`を超えたらフェード無しで
+  即`Destroy`。`MaxDuration`超過時は残留防止のため`startFallbackFade()`へ切替
+- **二重起動防止**: `updateRetreatingEnemy()`はフェードへの切替・境界超過のDestroyのどちらでも、
+  該当処理を呼ぶ**前**に`retreatingEnemies[model]=nil`する。これにより同じモデルへ
+  Tween/task.delayが複数回作られることはない(ユーザー指示による追加要件)
+- `Clear()`: `retreatingEnemies`内のモデルをDestroyし`table.clear()`する処理を追加
+
+### `CURRENT_SPEC.md` / `SETUP.md`
+
+- `CURRENT_SPEC.md`: §13-2/§13-4を新演出に合わせて修正し、設計判断を`## 15. Step 5-2の設計判断`
+  として新設(方向計算・終了条件・二重起動防止・`CountAlive`等が自動的に対象外になる理由を記録)
+- `SETUP.md`: Phase 9のチェックリストを新演出向けに更新(街外周へ移動する見た目・
+  残留しないことの確認を追加)。Phase 10の★2昇格時の記述も追従
+
+## 変更しなかったもの
+
+`ThreatManager`の昇格処理・`pendingDeployments`・`activeTransports`・兵士5連射・ヘリ・武器・UI・
+スコア/タイム値・Pathfindingはいずれも無変更。新しいRemoteEvent/Effectも追加していない。
+
+## 次ステップへの申し送り
+
+- `SETUP.md` **Phase 9**を上から順にStudioで確認すること。特に「街外周へ移動して消える」
+  「モデルが残留しない」「撤退中は攻撃・被弾・爆風の対象にならない」を重点的に見る
+- `MaxDuration`(8秒)によるフォールバックフェードは、街の形状上ほぼ発生しない想定のパス。
+  実機で頻発するようなら`Speed`不足か`ExitMargin`過大の可能性があるため、まず`Speed`を疑うこと
+
+## ユーザー手作業
+
+- `SETUP.md` **Phase 9**を上から順に確認

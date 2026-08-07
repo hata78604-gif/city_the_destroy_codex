@@ -253,7 +253,10 @@ StarterPlayer/StarterPlayerScripts
 | DebugLog | true | 段階到達時刻・湧き・撃破をサーバーログに出す |
 | CorpseDespawnTime | 6 | 撃破した敵の死体が消えるまでの秒数 |
 | Retreat.Enabled | true | falseで昇格時の旧部隊撤退を行わない(切り分け用。Step5-0) |
-| Retreat.FadeTime | 0.6 | 撤退開始から完全に消えるまでの秒数(Step5-0。§13-4参照) |
+| Retreat.Speed | 45 | 撤退時の直進速度(stud/s)。通常敵より明確に速い(Step5-2。§15参照) |
+| Retreat.ExitMargin | 25 | cityBoundsからこの距離だけ余分に出てからDestroyする(Step5-2) |
+| Retreat.MaxDuration | 8 | この秒数を超えても抜けきらない場合はFallbackFadeTimeへ切替(残留防止。Step5-2) |
+| Retreat.FallbackFadeTime | 0.4 | 降下中兵士の撤退・MaxDuration超過時だけ使う安全弁のフェード秒数(Step5-2。旧FadeTime) |
 | Damage.Invincible | 0 | 被弾後の無敵秒数(プレイヤーごと)。**2026-07-31 実機フィードバックで2.0→0に変更**。体力表示が無いゲームで無敵中の被弾を無視すると「当たっているのに減らないバグ」に見えるため。理論ドレインは警官4人で-1.8秒/秒、★3の兵士8人では-10秒/秒になる。★3(Step6)で無敵時間の復活か`MaxLossPerMinute`のどちらかの再検討が必要 |
 | Damage.DefaultTelegraph | 0 | 敵種別に`Telegraph`が無い場合の既定値(秒)。判定タイミングそのもの |
 | Damage.BeamDuration | 0.2 | 赤い予告ビームが画面に残る秒数。判定とは無関係の見た目のみ |
@@ -783,9 +786,12 @@ Step4dでバズーカが0.3秒間隔の連射になっても1発ごとに必ず�
 
 ## 13. Step 5-0 の設計判断
 
-危険度昇格時に前段階の敵部隊をその場で行動停止させ、`Config.Threat.Retreat.FadeTime`秒で
-フェードアウトさせる「撤退」処理を導入した(`ThreatManager.promote()` / `EnemyManager.RetreatSquad()`)。
-敵種別・編成そのものは今回変更していない(★2・★3はまだ`Config.Threat.Stages`に登録されない)。
+危険度昇格時に前段階の敵部隊をゲーム上即座に無効化する「撤退」処理を導入した
+(`ThreatManager.promote()` / `EnemyManager.RetreatSquad()`)。撤退の見た目(その場でフェード消滅
+させるか、街外へ退場させるか)はStep5-2で変更している(§15参照)。本節はStep5-0時点の設計判断
+(即無効化・スコア等の対象外化・撤退済み部隊の再スポーン防止)を記録したもので、これらの判断自体は
+Step5-2でも維持している。敵種別・編成そのものは変更していない(★3はまだ`Config.Threat.Stages`に
+登録されない)。
 
 ### 13-1. `ThreatManager`は昇格時に旧`currentSquadId`を撤退させる
 
@@ -802,9 +808,12 @@ Step4dでバズーカが0.3秒間隔の連射になっても1発ごとに必ず�
 1. `retiredSquads[squadId] = true`を最初に設定する(以降このsquadIdからの新規生成を防ぐ)
 2. `enemies`を反復しながら削除せず、対象を一度配列へ集めてから処理する(取りこぼし防止)
 3. 各敵について: `enemy.alive = false` → `Retreating`/`Dead`属性を`true`に → 頭上マーカーと
-   被弾フラッシュを無効化 → 全`BasePart`の`CanQuery`/`CanCollide`を`false`に → `Transparency`を
-   `FadeTime`秒かけて`1`へTween → `enemies`テーブルから除去 → `FadeTime`秒後に`Destroy()`を
-   1モデルにつき1本の`task.delay`で予約
+   被弾フラッシュを無効化 → 全`BasePart`の`CanQuery`/`CanCollide`を`false`に → `enemies`テーブルから
+   除去
+
+ここまでは即座に行う。ここから先の見た目の消し方はStep5-2で分岐した(§15参照): 地上の敵は
+`retreatingEnemies`へ登録して街外周へ移動させ、降下中の兵士(`enemy.deploying == true`)だけ
+その場でフェードアウトさせる。
 
 **撤退は撃破ではない。** `killEnemy()`は呼ばない。スコア・タイム・撃破数・撃破演出・撃破音・
 死体は一切発生しない。
@@ -819,11 +828,11 @@ Step4dでバズーカが0.3秒間隔の連射になっても1発ごとに必ず�
 撤退前に既に降ろされていた警官は親パトカーと同じ`squadId`を持つため、同じ`RetreatSquad()`呼び出しで
 まとめて撤退する。
 
-### 13-4. 撤退した敵は`Config.Threat.Retreat.FadeTime`秒で消える
+### 13-4. 撤退した敵が消えるまで(Step5-2で変更。詳細は§15)
 
-初期値は`0.6`秒。撤退開始と同時に`CanQuery = false`になるため、フェード中の敵にバズーカを
-撃つと弾はすり抜ける(意図した挙動)。長くするほど「見えているのに当たらない」違和感が増し、
-短くするほど「突然消えた」ように見える。実機での採用値と理由は`PROGRESS.md`に記録する。
+Step5-0時点では全敵が`Config.Threat.Retreat.FadeTime`秒でその場フェード消滅していたが、
+Step5-2で地上の敵は街外周への移動に変更した。撤退開始と同時に`CanQuery = false`になる点は
+変わらないため、撤退中の敵にバズーカを撃つと弾はすり抜ける(意図した挙動)。
 
 ### 13-5. 撤退済み部隊からの遅延スポーンを防止する
 
@@ -1030,3 +1039,68 @@ Step5-1実装後の実機プレイテストで、モバイルの「発射」ボ�
 §14-9で起爆ボタンを右下隅(`UDim2.new(1,-20,1,-20)`)へ移動したが、スマホ実機ではRoblox標準のジャンプボタンと重なることが判明した。旧モバイル「発射」ボタンがあった位置(`UDim2.new(1,-20,1,-130)`)は「右手親指で押しやすい」「ジャンプボタンより上に逃げる」「下部中央の武器スロットと水平方向に十分離れている」という実績があったため、起爆ボタンをその位置へ再移動した。サイズ(`100×60`)・表示文字・色・`Visible`制御・`DetonateRequest`・Fキー起爆はすべて無変更。
 
 あわせて、装備中の武器スロットが「黄色3pxの枠」だけではスマホ実機で目立たなかったため、装備中の見た目を「ほぼ黒(`Color3.fromRGB(8,8,10)`・`Transparency=0.05`)背景 + 黄色5px枠」に強調した。未装備スロットの見た目(`Color3.fromRGB(30,30,35)`・`Transparency=0.3`・黄色枠OFF)は変更していない。両状態の色・透明度・枠太さは`UIController.client.lua`内のローカル定数(`SLOT_NORMAL_*`/`SLOT_SELECTED_*`)に集約し、スロット生成時と`WeaponSelected`受信時の両方が同じ定数を参照する(初期生成時と装備解除時で通常色がズレる事故を防ぐため)。クールダウン中の暗転`overlay`は無変更で、装備中の黄色太枠と共存する(`overlay`が枠を完全に隠す構造にはなっていないため、ZIndexは変更していない)。
+
+## 15. Step 5-2 の設計判断(旧部隊の撤退演出改善)
+
+Step5-0の撤退演出(その場でフェード消滅)を、「ゲーム上は即無効化 → 最寄りの街外周へ高速移動 →
+街の外へ出たらDestroy」に変更した。§13で確定した即無効化(`enemy.alive = false`・`Retreating`/
+`Dead`属性・マーカー/被弾フラッシュOFF・`CanQuery`/`CanCollide`OFF・`enemies`テーブルからの除去)は
+一切変更していない。変更したのはその後の「消し方」だけである。
+
+### 15-1. `EnemyManager`に`retreatingEnemies`を新設
+
+`retreatingEnemies[model] = { model, core, dir, startedAt }`。`RetreatSquad()`は即無効化の直後、
+`enemy.deploying == true`(ヘリ降下中)の個体だけ従来どおりのフェード処理(`startFallbackFade()`。
+§15-3参照)へ回し、それ以外の地上個体をここへ登録する。`dir`は登録時に1回だけ計算する単位ベクトル
+(§15-2)で、以後は変更しない(移動中に街の形状が変わることは無いため、毎フレーム再計算する必要が
+ない)。
+
+### 15-2. 撤退方向の決め方
+
+現在位置から街の4辺(`+X`/`-X`/`+Z`/`-Z`。`cityBounds`基準の正方形境界)までの距離を比較し、
+最も近い1辺へ向かう軸方向の単位ベクトルを選ぶ。斜め方向には逃げない(実装を単純に保つため)。
+`cityBounds`は`EnemyManager.Init()`が`roadLines`の最外周値から導出済みの既存値をそのまま使う
+(新しい座標計算は増やしていない)。
+
+### 15-3. 移動と終了条件
+
+共有Heartbeatで、通常の`enemies`は従来どおり`aggressive == true`のときだけ更新するが、
+`retreatingEnemies`は`aggressive`に関係なく毎フレーム更新する(ラウンド終了直後でも撤退中の
+モデルが画面上で急停止しないようにするため)。各フレーム、`Config.Threat.Retreat.Speed`(45)
+で`dir`方向へ直進し、`cityBounds + Config.Threat.Retreat.ExitMargin`(25)を超えたら**フェード無しで
+即`Destroy()`**する(街の外に完全に抜けた後なので、消える瞬間がプレイヤーの視界に入りにくい前提)。
+
+`Config.Threat.Retreat.MaxDuration`(8秒)を超えても抜けきらない場合(街の形状や湧き位置の関係で
+稀に発生しうる)は、残留防止のため`startFallbackFade()`(`FallbackFadeTime`=0.4秒でフェードして
+`Destroy`。旧`FadeTime`と同じ仕組みを異常系専用の安全弁として残したもの)に切り替える。
+
+**二重起動防止**: `updateRetreatingEnemy()`は、MaxDuration超過でフェードへ切り替える場合も、
+境界を超えて即Destroyする場合も、**該当処理を呼ぶ前に必ず`retreatingEnemies[model] = nil`する**。
+これにより、同じモデルが次フレーム以降も`retreatingEnemies`から拾われて`startFallbackFade()`や
+`Destroy()`が複数回呼ばれることはない(Tweenやtask.delayの多重生成を防ぐ)。
+
+### 15-4. 降下中兵士(`enemy.deploying == true`)は従来どおりその場でフェードする
+
+ヘリから降下中の兵士は空中にいるため、地上への高速移動という演出が成立しない。この場合だけ
+即無効化の直後に`startFallbackFade()`を呼び、`FallbackFadeTime`でその場フェードしてから消す
+(Step5-0までの全個体共通だった挙動を、この1ケースだけ残した形になる)。
+
+### 15-5. 撤退中はCountAlive等の対象に戻らないこと
+
+撤退中の個体は§13-2の時点で既に`enemies`テーブルから除去されている。`CountAlive`・
+`OnExplosion`(爆風判定)はどちらも`enemies`テーブルのみを走査するため、`retreatingEnemies`に
+登録されているかどうかに関わらず、これらの対象には最初から入らない。攻撃(`fireAttack`/
+`fireBurst`)も同様に`enemies`から外れることで自然に停止する。この性質のためStep5-2では
+`CountAlive`・`OnExplosion`・攻撃系のいずれにも変更を加えていない。
+
+### 15-6. `EnemyManager.Clear()`
+
+`retreatingEnemies`内のモデルを明示的に`Destroy()`したうえで`table.clear(retreatingEnemies)`する
+処理を追加した。`folder:Destroy()`(既存)でも子として一括破棄はされるが、`retreatingEnemies`
+テーブル自体への参照を残さないことを明示するため、他の状態(`activeTransports`等)と同じ書き方に
+揃えた。
+
+### 15-7. `Config.Threat.Retreat.FadeTime`の廃止
+
+`FadeTime`(全個体共通の即時フェード秒数)は`Speed`/`ExitMargin`/`MaxDuration`/`FallbackFadeTime`に
+置き換えて削除した。削除前に`EnemyManager.lua`以外からの参照が無いことを確認済み。

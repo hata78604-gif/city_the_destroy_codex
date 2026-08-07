@@ -296,10 +296,14 @@ Config.Threat = {
 
 	CorpseDespawnTime = 6, -- 撃破した敵の死体が消えるまでの秒数
 
-	-- ▼ 撤退(Step5-0)。危険度昇格時に前段階の部隊をその場で行動停止させ、フェードアウトさせる
+	-- ▼ 撤退(Step5-0→Step5-2で演出変更)。危険度昇格時に前段階の部隊をその場で無効化し、
+	-- 最寄りの街外周へ高速移動させたのち、街の外に出たら消す
 	Retreat = {
 		Enabled = true, -- falseにすると昇格時の旧部隊撤退を行わない。Config.Threat.Enabledと同じ切り分け用スイッチ
-		FadeTime = 0.6, -- 撤退開始から完全に消えるまでの秒数。撤退が見える時間を残しつつ新部隊と長時間重ならない値(暫定)
+		Speed = 45, -- 撤退時の直進速度(stud/s)。通常の敵より明確に速く見える値
+		ExitMargin = 25, -- cityBoundsからこの距離だけ余分に出てからDestroyする(街の外に完全に抜けてから消す)
+		MaxDuration = 8, -- この秒数を超えても抜けきらない場合はFallbackFadeTimeで消す(残留防止)
+		FallbackFadeTime = 0.4, -- 降下中兵士の撤退・MaxDuration超過時だけ使う安全弁のフェード秒数
 	},
 
 	-- ▼ 被弾・ダメージ(全段階共通)

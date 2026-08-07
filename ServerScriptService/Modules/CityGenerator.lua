@@ -37,6 +37,8 @@ if not Visual then
 	Visual = {
 		TerrainEnabled = false,
 		StoneWall = { Enabled = false },
+		Roof = { GableEnabled = false },
+		Props = { Enabled = false },
 		BuildingPalettes = {
 			{
 				name = "仮",
@@ -229,6 +231,75 @@ local function buildSlab(parent, buildingId, color, material, baseCf, centerLoca
 end
 
 --------------------------------------------------------------------
+-- 切妻屋根(三角屋根)。WedgePartを2枚1組(斜面が向かい合う)にして、
+-- 棟(ridge)方向に Config.Block.Size.X 単位で分割する(巨大な1枚パーツを避けるため)。
+-- 壁ブロックと同じくDestructibleタグ・BuildingId属性を付ける。
+--
+-- WedgePartの向き: Size=(X,Y,Z)のとき、局所-Z側が高さゼロの薄い辺、
+-- 局所+Z側が高さSize.Yの垂直な辺になる(局所X方向には断面形状が変わらず一定に伸びる)。
+-- rotY=0で局所Zは+Z、90°で局所Zは+X、-90°で局所Zは-X、180°で局所Zは-Zへ向く。
+--
+-- ★訂正履歴: Step V-1ではこの向きを逆(局所+Zが薄い辺・局所-Zが高い辺)と実機スクリーンショットから
+-- 判断してbuildGableRoofのrotYを決めていたが、その読み取りが誤りだった。結果として2枚のWedgePartの
+-- 「低い辺」同士が棟(建物中央)に集まり、屋根がV字(中央が谷、両端が高い)になる不具合が実機で
+-- 確認された(Step V-2で修正)。スクリーンショットの目視判断は再度誤る可能性があるため、
+-- 今後この前提を疑う場合は目視ではなく、屋根中央(Z=0)と端(Z=±run)の最高Yを実測して比較すること。
+--------------------------------------------------------------------
+local function createRoofWedge(size, cf, buildingId, color, material, parent)
+	if overBudget() then
+		return nil
+	end
+	local wedge = Instance.new("WedgePart")
+	wedge.Size = size
+	wedge.CFrame = cf
+	wedge.Anchored = true
+	wedge.Material = material
+	wedge.TopSurface = Enum.SurfaceType.Smooth
+	wedge.BottomSurface = Enum.SurfaceType.Smooth
+	wedge.CastShadow = false
+	wedge.Color = jitterColor(color)
+
+	CollectionService:AddTag(wedge, "Destructible")
+	wedge:SetAttribute("BuildingId", buildingId)
+
+	wedge.Parent = parent
+	blockCount += 1
+	return wedge
+end
+
+-- 棟は建物の正面(道路に面した側)と平行に走らせる(Step V-2で修正。旧実装は長辺基準で、
+-- 道路から見て三角の妻面が見えてしまうバグがあった)。
+-- 正面壁(ドアのある壁)は buildBuilding が常にローカルX方向に伸びる向きで組んでおり、
+-- rotationYによる回転は baseCf 経由で壁・屋根へ一律に適用される。したがって「正面と平行な棟」は
+-- ローカル座標では常にX軸方向で固定でよく、rotationYを個別に参照する必要はない
+-- (グリッドモード・従来モードの両方でslot.rotationYがbaseCfに反映されるため、この基準は両モード
+-- で共通して正しく機能する)。
+-- sx/sz: 建物の全体寸法。wallTopY: 壁の最上段の上面(ローカルY)。roofCfg: Config.Visual.Roof
+local function buildGableRoof(parent, buildingId, palette, baseCf, sx, sz, wallTopY, roofCfg)
+	local ridgeLen = sx -- 棟の長さ=正面壁と同じX方向の全長
+	local run = sz / 2 + roofCfg.Overhang -- 棟から軒先(軒の出込み)までの水平距離(Z方向)
+	local segCount = math.ceil(ridgeLen / BW)
+	local roofCenterY = wallTopY + roofCfg.GableHeight / 2
+
+	local pos = -ridgeLen / 2
+	for i = 1, segCount do
+		-- 8stud単位で分割。割り切れない場合は最後の1枚だけ残りの長さにする
+		local segLen = if i < segCount then BW else ridgeLen - (segCount - 1) * BW
+		local segCenter = pos + segLen / 2
+		pos += segLen
+
+		for _, sign in { -1, 1 } do
+			local size = Vector3.new(segLen, roofCfg.GableHeight, run)
+			local rotY = if sign > 0 then math.rad(180) else 0
+			local slopeOffset = sign * run / 2
+			local localPos = Vector3.new(segCenter, roofCenterY, slopeOffset)
+			createRoofWedge(size, baseCf * CFrame.new(localPos) * CFrame.Angles(0, rotY, 0),
+				buildingId, palette.roofColor, palette.roofMaterial, parent)
+		end
+	end
+end
+
+--------------------------------------------------------------------
 -- 建物1棟(slot の位置・向きに、template の形 + palette の質感で建てる)
 --------------------------------------------------------------------
 local function buildBuilding(slot, template, storeys, palette, buildingId, parent)
@@ -272,9 +343,17 @@ local function buildBuilding(slot, template, storeys, palette, buildingId, paren
 		buildSlab(model, buildingId, palette.wallColors[1], palette.material, baseCf,
 			Vector3.new(0, i * storeyHeight + BH / 2, 0), sx - 2 * BD, sz - 2 * BD)
 	end
-	-- 屋根(最上段は壁と違う色・材質にして質感を出す)
-	buildSlab(model, buildingId, palette.roofColor, palette.roofMaterial, baseCf,
-		Vector3.new(0, rows * BH + BH / 2, 0), sx, sz)
+	-- 屋根(最上段は壁と違う色・材質にして質感を出す)。
+	-- 低層(storeys <= GableMaxStoreys)は切妻屋根(三角)、それ以外は従来どおり陸屋根(平ら)
+	local roofCfg = Visual.Roof
+	local useGable = roofCfg and roofCfg.GableEnabled and storeys <= roofCfg.GableMaxStoreys
+	if useGable then
+		buildGableRoof(model, buildingId, palette, baseCf, sx, sz, rows * BH, roofCfg)
+		model:SetAttribute("HasGableRoof", true) -- EnemyManager.findRooftopCandidatesが屋上候補から除外するために使う
+	else
+		buildSlab(model, buildingId, palette.roofColor, palette.roofMaterial, baseCf,
+			Vector3.new(0, rows * BH + BH / 2, 0), sx, sz)
+	end
 
 	model.Parent = parent
 	return model.Name
@@ -636,9 +715,19 @@ local function buildProps(parent)
 	buildBench(CFrame.new(-24, SIDEWALK_TOP, -10) * CFrame.Angles(0, math.rad(180), 0), parent)
 end
 
+-- 建物の実寸フットプリント(半幅)を回転込みで求める(石垣・街小物のスキップ判定用)。
+-- rotationYは0/90/180/-90のみ(generateGridSlotsが払い出す値)。90/-90は前後左右の軸が入れ替わる
+local function footprintHalfExtents(sizeX, sizeZ, rotationY)
+	if rotationY % 180 ~= 0 then
+		return sizeZ / 2, sizeX / 2
+	end
+	return sizeX / 2, sizeZ / 2
+end
+
 --------------------------------------------------------------------
 -- プロシージャル建物を1棟生成して info エントリを返す
--- (grid モードで使用。従来経路の生成ロジックと同じ内容を関数化したもの)
+-- (grid モードで使用。従来経路の生成ロジックと同じ内容を関数化したもの)。
+-- 2つ目の戻り値は建物のフットプリント { x, z, halfX, halfZ }(石垣・街小物のスキップ判定用)
 --------------------------------------------------------------------
 local function generateProceduralBuilding(slot, id, parent)
 	-- スロットに収まるテンプレートからランダムに選ぶ(候補が無ければ最小テンプレで避難)
@@ -662,6 +751,8 @@ local function generateProceduralBuilding(slot, id, parent)
 
 	local before = blockCount
 	local displayName = buildBuilding(slot, template, storeys, palette, id, parent)
+	local halfX, halfZ = footprintHalfExtents(template.sizeX, template.sizeZ, slot.rotationY)
+	local footprint = { x = slot.position.X, z = slot.position.Z, halfX = halfX, halfZ = halfZ }
 	return {
 		name = displayName,
 		total = blockCount - before,
@@ -669,7 +760,7 @@ local function generateProceduralBuilding(slot, id, parent)
 		bonusGiven = false,
 		-- 建物の中心(全壊時の粉塵エフェクトの発生位置)
 		center = slot.position + Vector3.new(0, GROUND + storeys * Config.RowsPerStorey * BH / 2, 0),
-	}
+	}, footprint
 end
 
 --------------------------------------------------------------------
@@ -759,6 +850,145 @@ local function buildRoadGrid(parent)
 	end
 end
 
+-- footprints(建物のフットプリント配列)のいずれかと重なるか(マージン込み)。
+-- 石垣・街小物がグリッドモードで建物にめり込むのを防ぐ共通判定
+local function overlapsFootprint(x, z, footprints, margin)
+	for _, fp in footprints do
+		if math.abs(x - fp.x) < fp.halfX + margin and math.abs(z - fp.z) < fp.halfZ + margin then
+			return true
+		end
+	end
+	return false
+end
+
+--------------------------------------------------------------------
+-- グリッド街の石垣(Step V-1)。各街区(タイル)の外周(±GRID_BLOCKSPAN/2)に沿って配置する。
+-- 従来モードの buildStoneWalls は Config.City.Slots 前提のため一切変更せず、
+-- こちらはグリッドの座標系専用に新設した(方針は指示書§4-2参照)。
+-- 石垣は Destructible だが BuildingId は付けない(全壊判定・破壊率の集計に混ぜないため)
+--------------------------------------------------------------------
+local FOOTPRINT_MARGIN = 8 -- 建物フットプリントからの追加クリアランス(従来モードのnearBuildingと同じ値)
+
+local function buildGridStoneWalls(parent, footprints)
+	local SW = Visual.StoneWall
+	if not SW.Enabled then
+		return
+	end
+	local model = Instance.new("Model")
+	model.Name = "石垣"
+	local y = GROUND + BH / 2 -- 高さ2のブロックを地面に置く
+	local half = GRID_BLOCKSPAN / 2
+	local N = GRID_SIZE
+	for i = 0, N - 1 do
+		for j = 0, N - 1 do
+			local cx = (i - (N - 1) / 2) * GRID_TILESIZE
+			local cz = (j - (N - 1) / 2) * GRID_TILESIZE
+			-- 南北の辺(z = cz±half、x方向に一列)
+			for _, ez in { cz - half, cz + half } do
+				for x = cx - half, cx + half, SW.Spacing do
+					if not overlapsFootprint(x, ez, footprints, FOOTPRINT_MARGIN) then
+						createBlock(CFrame.new(x, y, ez), nil, SW.Color, Enum.Material.Cobblestone, model)
+					end
+				end
+			end
+			-- 東西の辺(x = cx±half、z方向に一列)
+			for _, ex in { cx - half, cx + half } do
+				for z = cz - half, cz + half, SW.Spacing do
+					if not overlapsFootprint(ex, z, footprints, FOOTPRINT_MARGIN) then
+						createBlock(CFrame.new(ex, y, z) * CFrame.Angles(0, math.rad(90), 0),
+							nil, SW.Color, Enum.Material.Cobblestone, model)
+					end
+				end
+			end
+		end
+	end
+	model.Parent = parent
+end
+
+--------------------------------------------------------------------
+-- グリッド街の街小物(Step V-1)。道路網(GetRoadLines)と街区の空きスペースを基準に配置する
+-- (Config.City.Slots は使わない)。従来モードの buildProps は変更しない(方針は指示書§4-2参照)。
+-- Step V-2で破壊可能に変更: 専用のModelにまとめて生成し、生成後にその配下のBasePartへ
+-- 一括でDestructibleタグを付ける(BuildingIdは付けない。全壊判定・破壊率・スナイパーの
+-- 屋上候補探索に混ざらないようにするため。石垣と同じ扱い)。
+-- buildStreetlight/buildCar/buildTree/buildBenchは従来モードのbuildPropsとも共有しているため、
+-- ヘルパー自体は無改修のまま、生成後に一括タグ付けする方式にしている
+--------------------------------------------------------------------
+local function buildGridProps(parent, footprints)
+	local P = Visual.Props
+	if not P or not P.Enabled then
+		return
+	end
+	local model = Instance.new("Model")
+	model.Name = "街小物"
+
+	local W = Config.City.RoadWidth
+	local swW = Config.City.SidewalkWidth
+	local swOff = W / 2 + swW / 2 -- 車道中心から歩道中心までの距離
+	local N = GRID_SIZE
+	local roadLen = N * GRID_TILESIZE + W
+	local half = roadLen / 2
+	local shoulderOffset = W / 2 - 2.2 -- 車道の路肩(従来モードのbuildPropsと同じマージン)
+	local lines = CityGenerator.GetRoadLines()
+
+	-- 街灯: 各道路(縦・横)の両脇の歩道に等間隔
+	for _, p in lines do
+		local d = -half + P.LampSpacing / 2
+		while d <= half do
+			for _, s in { -1, 1 } do
+				buildStreetlight(p + s * swOff, d, model) -- 縦の道路(x=p)沿い
+				buildStreetlight(d, p + s * swOff, model) -- 横の道路(z=p)沿い
+			end
+			d += P.LampSpacing
+		end
+	end
+
+	-- 駐車車両: 各道路の路肩にCarsPerRoad台(色は敵のパトカーと紛らわしくない中間色に限定)
+	local carColors = {
+		Color3.fromRGB(120, 120, 130), Color3.fromRGB(90, 100, 130),
+		Color3.fromRGB(150, 60, 55), Color3.fromRGB(60, 110, 90),
+	}
+	for _, p in lines do
+		for n = 1, P.CarsPerRoad do
+			local d = -half + (n - 0.5) / P.CarsPerRoad * roadLen
+			local side = if n % 2 == 0 then 1 else -1
+			-- 縦の道路(x=p)沿い、進行方向をZ軸に沿わせる
+			buildCar(CFrame.new(p + side * shoulderOffset, ROAD_TOP, d) * CFrame.Angles(0, math.rad(90), 0),
+				carColors[rng:NextInteger(1, #carColors)], model)
+			-- 横の道路(z=p)沿い、進行方向をX軸に沿わせる
+			buildCar(CFrame.new(d, ROAD_TOP, p + side * shoulderOffset),
+				carColors[rng:NextInteger(1, #carColors)], model)
+		end
+	end
+
+	-- 木・ベンチ: 各街区(タイル)の中央付近(建物は街区の4辺に並ぶため、中央が完全な空きスペースになる)
+	local treeRadius = math.max(0, GRID_MAXSIZE - 8)
+	for i = 0, N - 1 do
+		for j = 0, N - 1 do
+			local cx = (i - (N - 1) / 2) * GRID_TILESIZE
+			local cz = (j - (N - 1) / 2) * GRID_TILESIZE
+			for _ = 1, P.TreesPerBlock do
+				local ang = rng:NextNumber() * math.pi * 2
+				local r = rng:NextNumber() * treeRadius
+				buildTree(cx + math.cos(ang) * r, cz + math.sin(ang) * r, model)
+			end
+			-- ベンチ: 交差点付近(タイル南西角、南側道路の歩道上。歩道の内縁=街区の縁に
+			-- swW/2だけ寄せた位置が歩道の中心線になる)
+			for _ = 1, P.BenchesPerBlock do
+				local benchZ = cz - GRID_BLOCKSPAN / 2 + swW / 2
+				buildBench(CFrame.new(cx - GRID_BLOCKSPAN / 2 + 6, SIDEWALK_TOP, benchZ), model)
+			end
+		end
+	end
+
+	for _, part in model:GetDescendants() do
+		if part:IsA("BasePart") then
+			CollectionService:AddTag(part, "Destructible")
+		end
+	end
+	model.Parent = parent
+end
+
 --------------------------------------------------------------------
 -- マップ全体の生成
 --------------------------------------------------------------------
@@ -779,16 +1009,27 @@ function CityGenerator.Generate()
 		-- 打ち切られても道路網は必ず完成しているようにする(道路が上限で消えるのを防ぐ)
 		buildRoadGrid(map)
 
-		-- 座標計算したスロットにプロシージャル建物を建てる。
-		-- 手作りテンプレ(chooseBuildingSource)・石垣・小物は当面使わない
-		-- (まず建物と道路だけで動作確認する方針)
+		-- 座標計算したスロットにプロシージャル建物を建てる(手作りテンプレは従来モードのみ・§7未実装のまま)。
+		-- フットプリントを集めておき、石垣・小物が建物にめり込まないようにする
 		local slots = generateGridSlots()
+		local footprints = {}
 		for id, slot in ipairs(slots) do
 			if overBudget() then
 				break -- 上限に達したら以降のスロットは生成しない(打ち切り)
 			end
-			info[id] = generateProceduralBuilding(slot, id, map)
+			local entry, footprint = generateProceduralBuilding(slot, id, map)
+			info[id] = entry
+			table.insert(footprints, footprint)
 		end
+
+		-- 石垣(破壊対象だが破壊率の集計外。従来モードと同じくblockCountとは分けて数える)
+		local beforeStone = blockCount
+		buildGridStoneWalls(map, footprints)
+		stoneCount = blockCount - beforeStone
+		blockCount = beforeStone
+
+		-- 街小物(非破壊)
+		buildGridProps(map, footprints)
 
 		map.Parent = workspace
 		print(("[CityGenerator] 生成完了(グリッド街 %dx%d): 建物ブロック %d / 石垣 %d / 道路・小物 %d / 合計 %d (上限 %d)")

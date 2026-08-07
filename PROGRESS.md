@@ -902,3 +902,210 @@ Step5-0の撤退演出(危険度昇格時、旧部隊がその場でフェード
   - 1〜3波目の敵のExplorer上の`SquadId`属性がすべて同じであること
   - ★1では従来どおり全滅しないと再派遣されないこと
   - 出力ウィンドウに新しい赤いエラーが出ないこと
+
+---
+
+# 街並みリアル化 Step V-1(パレット・三角屋根・石垣・街小物。2026-08-07)
+
+`SPEC_VISUAL_STEP1.md`に基づく実装。グリッドモードの街を「町らしく」見せるための4施策
+(パレット刷新・三角屋根・石垣・街小物)をまとめて実装した(指示書の分割提案に対し、
+ユーザーの選択により一括で実装)。
+
+---
+
+## 実装したもの
+
+- `ReplicatedStorage/Config.lua`
+  - `Config.Visual.BuildingPalettes`: 3種(砂岩の家/コンクリビル/レンガの店)→5種
+    (白い家/ベージュの家/レンガの店/コンクリビル/ガラスビル)に刷新。壁は低彩度、
+    屋根は全パレット共通でRGB各値60以下の濃いグレー〜黒に統一
+  - `Config.Visual.Roof`(**新設**): `GableEnabled`/`GableMaxStoreys`(=2)/`GableHeight`(=6)/`Overhang`(=2)
+  - `Config.Visual.Props`(**新設**): `Enabled`/`LampSpacing`(=62)/`CarsPerRoad`(=3)/`TreesPerBlock`(=5)/`BenchesPerBlock`(=1)
+
+- `ServerScriptService/Modules/CityGenerator.lua`
+  - `createRoofWedge`/`buildGableRoof`(**新設**): `WedgePart`2枚1組×`Config.Block.Size.X`(=8)単位の
+    分割で切妻屋根を作る。`storeys <= GableMaxStoreys`の建物に適用し、建物の`Model`に
+    `HasGableRoof=true`を付与。壁ブロックと同じ`Destructible`タグ・`BuildingId`属性・スコアが乗る
+  - `footprintHalfExtents`(**新設**): 建物のスロット位置・回転から実寸フットプリント(半幅)を求める
+  - `generateProceduralBuilding`: 戻り値にフットプリントを追加(第2戻り値。`info`テーブルには含めない)
+  - `overlapsFootprint`/`buildGridStoneWalls`/`buildGridProps`(**新設**): グリッド専用の石垣・街小物。
+    従来モードの`buildStoneWalls`/`buildProps`は無変更(方針どおり別関数として新設)
+  - `CityGenerator.Generate()`のグリッド分岐に3・4番目のステップとして石垣・街小物の生成を追加
+
+- `ServerScriptService/Modules/EnemyManager.lua`
+  - `findRooftopCandidates`: `part.Parent`(建物の`Model`)が`HasGableRoof`を持つ場合はそのパーツを
+    屋上候補から除外する1行を追加。変更はこの1点のみ
+
+- `CURRENT_SPEC.md` / `SETUP.md`: Config一覧・生成順序・確認チェックリストを更新し、
+  `## 18. Step V-1 の設計判断`として切妻屋根の分割理由・屋上候補除外の理由・
+  街小物を非破壊にした理由・石垣に`BuildingId`を付けない理由を記録
+
+---
+
+## 暫定措置・妥協点
+
+- **ベンチの配置は「タイル南西角の南側歩道」に固定**。指示書の「交差点付近」は具体的な座標まで
+  規定されておらず、実装上の判断として1箇所に固定した(`BenchesPerBlock`を増やしても同じ角に集まる)
+- **木の配置半径(`GRID_MAXSIZE-8`)はConfigキー化していない**。指示書が新設を指定したConfigキーは
+  `TreesPerBlock`(本数)のみで、配置範囲は「振る値」として明示されていなかったため内部定数のまま
+- **石垣のスキップマージン(8stud)はConfigキー化していない**。従来モードの`nearBuilding`と同じ値を
+  再利用しただけで、指示書にも新規キーとしての指定は無かったため
+
+---
+
+## ハマった点と対処
+
+- **`WedgePart`の傾斜面の向きが未検証だった**: 指示書には形状の作り方(2枚1組・分割単位)は
+  書かれているが、`WedgePart`のローカル座標系でどちらの面が高さゼロになるかはRobloxの仕様として
+  暗黙知になっている。接続済みのRoblox Studio(MCP)でテスト用`WedgePart`を生成し、複数方向から
+  `screen_capture`で見た目を確認して「局所+Z側が高さゼロ、局所-Z側が高さ最大、局所X方向には
+  断面が一定」という向きを実測で確定させてから`buildGableRoof`の回転・配置式を導出した
+  (`CityGenerator.lua`の`buildGableRoof`直上のコメント参照)
+- **棟の長さが8で割り切れない建物がある**(「小屋」sizeZ=20): 指示書は「8単位で分割する」としか
+  書いておらず端数の扱いが未規定だったため、計画報告時にユーザーへ確認し「末尾セグメントを
+  残りの長さにする」(20→8+8+4)方針で確定してから実装した
+- **石垣が建物のフットプリント情報を必要とするが、`CityGenerator.Generate()`の戻り値`info`は
+  `GameManager`/`DestructionManager`が消費する既存の契約**: `info`にフットプリントを混ぜると
+  下流モジュールへの影響範囲が読めなくなるため、`generateProceduralBuilding`の第2戻り値として
+  別ルートで`Generate()`内のローカル変数に渡す設計にし、公開契約を変更しなかった
+- **`screen_capture`(Roblox Studio MCP)がグリッド街(パーツ1万5千前後)の規模だとタイムアウトする**:
+  最初の数回(小さいテスト用パーツのみ)は成功したが、実際の街を生成した状態でのキャプチャは
+  複数回試しても`Request timeout`で失敗し続けた。最終的には見た目の目視確認を断念し、
+  (1)`WedgePart`の向きは事前の小規模テストで実測済み、(2)`execute_luau`で
+  `findRooftopCandidates`相当のフィルタ処理を直接実行し「切妻屋根88棟・陸屋根候補40棟」という
+  期待どおりの内訳を確認、(3)Play継続中の`get_console_output`でエラー・警告が出ないことを
+  複数回の再生成(パーツ数13,000〜17,500の幅で変動)で確認、という3点で代替検証した
+
+---
+
+## 次ステップへの申し送り
+
+- **見た目の最終確認(実際にどう見えるか)はユーザー側での目視確認が必要**。`screen_capture`が
+  機能しなかったため、三角屋根の傾き・軒の出方・石垣の途切れ方・街灯や車の配置の“見栄え”は
+  今回のセッションでは画像で確認できていない。ロジック・数値・エラー有無は検証済み
+- ベンチの配置(タイル南西角固定)・木の配置半径は、実機で見て単調に感じるようなら
+  `buildGridProps`側でランダム性やタイルごとのバリエーションを増やす余地がある
+- `Config.Visual.Roof.GableEnabled = false` / `Props.Enabled = false` / `StoneWall.Enabled = false`
+  はそれぞれ`execute_luau`で個別にfalseへ切り替えて再生成し、該当パーツが0個になることを確認済み
+
+---
+
+## ユーザー手作業
+
+- Studioで▶実行し、`SPEC_VISUAL_STEP1.md` §8の受け入れ基準(見た目・破壊・敵・性能)を
+  一通り目視確認すること。特に以下は今回のセッションでは確認できていない:
+  - 三角屋根の見た目(傾き・軒の出方が自然か)
+  - 石垣が建物の位置で正しく途切れているか(貫通していないか)
+  - 街灯・車・木・ベンチの配置が不自然に密集/偏っていないか
+  - ★2到達時、スナイパーが高層ビルの屋上に正しく立っているか(見た目のめり込み等がないか)
+- タブレット実機での確認(パーツ数増加後のメモリ・開始時FPS)
+- 実機で振ってほしいConfig値: `Roof.GableHeight`(棟の高さ)・`Roof.Overhang`(軒の出)・
+  `Props.LampSpacing`/`CarsPerRoad`/`TreesPerBlock`/`BenchesPerBlock`(密度)。
+  いずれも「多すぎ/少なすぎ」を目視で判断してから増減する想定
+
+---
+
+# 街並みリアル化 Step V-2(屋根の向き・瓦礫の当たり判定・小物の破壊。2026-08-08)
+
+`SPEC_VISUAL_STEP2.md`に基づく実装。Step V-1の実機プレイテストで見つかった3件の仕上げ
+(屋根の向きのバグ修正・瓦礫の当たり判定・街小物の破壊可能化)。新機能の追加ではない。
+
+---
+
+## 実装したもの
+
+- `ServerScriptService/Modules/CityGenerator.lua`
+  - `buildGableRoof`: 棟の向きの基準を「`sizeX`/`sizeZ`の長辺」から「常にローカルX軸
+    (=建物の正面壁と同じ向き)」に修正。`rotationY`はbaseCf経由で壁・屋根へ一律に適用される
+    ため、ローカルX軸に固定するだけで済み、`rotationY`を個別参照するコードは不要だった
+    (グリッドモード・従来モードの両方に自動的に正しく効く)
+  - `buildGridProps`: 生成物を専用の`Model`(「街小物」)にまとめ、生成後に配下の全
+    `BasePart`へ`Destructible`タグを一括付与(`BuildingId`は付けない)。共有ヘルパー
+    (`buildStreetlight`/`buildCar`/`buildTree`/`buildBench`)は無改修
+
+- `ServerScriptService/Modules/DestructionManager.lua`
+  - `COLLIDE_TIME`(`Config.Debris.CollideTime`のキャッシュ)を新設
+  - `loseCollision(part)`(**新設**): `part.Parent`があれば`CanCollide=false`にする
+  - `destroyBlockReal`: 末尾に`task.delay(COLLIDE_TIME, loseCollision, part)`を追加。
+    既存の瓦礫キュー(FIFO・`evictOldest`・`fadeAndRemove`)には触れていない
+
+- `ReplicatedStorage/Config.lua`
+  - `Config.Debris.CollideTime = 1.5`(**新規キー**。唯一の新規キー)
+  - `Config.Performance.MaxTotalParts`: 20000→35000
+  - `Config.City.RoadWidth`: 16→24
+  - `Config.Performance.DebrisLifetime`は8のまま変更不要だった(下記「ハマった点」参照)
+
+- `CURRENT_SPEC.md` / `SETUP.md`: Config一覧・グリッド計算式(`GRID_TILESIZE`等の再計算)・
+  確認チェックリストを更新し、`## 19. Step V-2 の設計判断`として棟の向きの基準・
+  瓦礫の当たり判定を時間経過で切る理由・街小物に専用スコアキーを作らなかった理由・
+  街小物と石垣を同じ扱いにした理由を記録。§18-3(街小物を非破壊にした理由)は
+  Step V-2で判断が覆ったことを明記して§19-3へ誘導
+
+---
+
+## 暫定措置・妥協点
+
+- 特になし。3件とも指示書どおりの恒久対応(バグ修正・仕様変更)であり、対症療法は今回で解消した
+
+---
+
+## ハマった点と対処
+
+- **指示書が前提する「暫定対処」がConfig.luaに実在しなかった**: 指示書は`DebrisLifetime`が
+  8→3に、`RoadWidth`が16→24に既に変更済み(実機プレイテストでの暫定対処)という前提で
+  書かれていたが、実際のファイルは`DebrisLifetime=8`(たまたま目標値と一致)・`RoadWidth=16`
+  (未反映)のままだった。おそらく別環境のStudioで実機テストのみ行われ、ファイルには
+  反映されていなかったと推測される。ユーザーに確認し、`RoadWidth`は24へ変更(指示書の
+  意図どおり)、`Config.Performance.MaxTotalParts`(受け入れ基準が35000を前提にしていたが
+  本文に変更指示が無かった)も35000へ変更する方針で進めることにした
+- **屋根の向きの修正が想定より単純だった**: 当初「`rotationY`を見て分岐する」実装を想定して
+  計画報告したが、コードを読み解くと`buildBuilding`の正面壁は常にローカルX方向で組まれており
+  `rotationY`は`baseCf`経由で壁・屋根に一律適用されるため、「棟を常にローカルX軸に固定する」
+  だけで両モードに自動的に正しく効くと分かった。分岐コードを書かずに済んだ
+  ぶん差分が小さくなった
+- **Roblox Studio MCPの`execute_luau`(Server)がGameManagerの初期化済み`DestructionManager`と
+  requireキャッシュを共有していないらしく、`deps`が`nil`でエラーになった**: 瓦礫の当たり判定
+  切り替えを実機で直接検証するため、テスト用のスタブ依存(`addScore`等の空関数)で
+  `DestructionManager.Init`を呼び直して検証した。実際のゲーム進行(GameManager経由)には
+  影響しない一時的な検証専用の処置
+
+---
+
+## 次ステップへの申し送り
+
+- 屋根の向き・瓦礫の当たり判定は実機(接続中のRoblox Studio)で直接検証済み
+  (下記「Studioでの検証結果」参照)。街小物の見た目(密度・配置)はStep V-1から変更していない
+- `Config.Debris.CollideTime`はまだ実機の「操作感」で調整されていない(既定1.5秒のまま)。
+  瓦礫の迫力と通行しやすさのバランスをタブレット実機で確認しながら微調整する余地がある
+
+---
+
+## Studioでの検証結果(このセッションで実施)
+
+接続中のRoblox Studio(MCP)で以下を直接確認した:
+
+- **棟の向き**: `店舗(1号棟)`(`rotationY=0`のスロット)の切妻屋根`WedgePart`の
+  `LookVector`を実測し、棟(分割方向)が建物の正面壁と同じワールドX軸方向に揃っていることを確認
+- **`GableEnabled=false`**: 切妻屋根0個(陸屋根に復帰)を確認
+- **街小物のDestructible化**: 生成後の「街小物」モデル配下938パーツ全てに`Destructible`タグが
+  付き、`BuildingId`は1つも付いていないことを確認
+- **瓦礫の当たり判定**: 実際に`DestructionManager.Explode`を発火させ、爆発直後は生成された
+  瓦礫18個全てが`CanCollide=true`、`CollideTime`(1.0秒)経過後の1.3秒後には18個全てが
+  `CanCollide=false`になることを確認。`CollideTime=0.2`という極端に小さい値でもエラーなく
+  完走(当たり判定解除→寿命フェード→削除まで)することを確認
+- **パーツ予算**: 複数回の再生成で合計14,900〜19,300個(上限35000)に収まることを確認。
+  Outputに新しいエラー・警告は出ていない(音声アセット読み込み失敗の警告は本変更と無関係の既知事象)
+
+---
+
+## ユーザー手作業
+
+- Studioで▶実行し、`SPEC_VISUAL_STEP2.md` §7の受け入れ基準のうち、上記「Studioでの検証結果」
+  に記載していない項目(実際にプレイヤーとして街を歩いて瓦礫の山を通り抜けられるか、
+  三角屋根が道路から見て斜面に見えるか、街灯や車が破壊できて見た目に違和感がないか等)を
+  目視・体感で確認すること
+- タブレット実機での確認(パーツ数増加後のメモリ・FPS。特に`RoadWidth`拡幅と
+  `MaxTotalParts`引き上げの影響)
+- 実機で振ってほしい値: `Config.Debris.CollideTime`(小さくすると早く通れるが瓦礫がぶつかる
+  迫力が減る)・`Roof.GableHeight`・`Config.Performance.DebrisLifetime`(8に戻したことで
+  瓦礫が残る時間が長くなったため、体感で重ければ調整)

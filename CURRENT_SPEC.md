@@ -66,7 +66,7 @@ StarterPlayer/StarterPlayerScripts
 ### Config.Performance
 | キー | 値 | 備考 |
 |---|---|---|
-| MaxTotalParts | 20000 | 生成直後の総パーツ数上限 |
+| MaxTotalParts | 35000 | 生成直後の総パーツ数上限。Step V-2で20000→35000(RoadWidth拡大・街小物のDestructible化ぶんの余裕) |
 | MaxUnanchoredParts | 1000 | 同時に物理挙動する瓦礫の上限 |
 | DebrisLifetime | 8 | 瓦礫が透明化を始めるまでの秒数 |
 
@@ -81,10 +81,19 @@ StarterPlayer/StarterPlayerScripts
 | Lighting.AtmosphereHaze | 1.5 |
 | TerrainEnabled | true |
 | TerrainDecoration | true |
-| BuildingPalettes | 3種(砂岩の家/コンクリビル/レンガの店。各material・wallColors×3・frameColor・roofMaterial・roofColor) |
-| StoneWall.Enabled | true(**グリッドモードでは未使用**。従来モードのみ) |
+| BuildingPalettes | 5種(白い家/ベージュの家/レンガの店/コンクリビル/ガラスビル。各material・wallColors×3・frameColor・roofMaterial・roofColor。Step V-1で3種→5種に刷新、壁は低彩度・屋根は全パレット共通で濃いグレー〜黒に統一) |
+| StoneWall.Enabled | true(グリッドモードは`buildGridStoneWalls`、従来モードは`buildStoneWalls`が使用。Step V-1でグリッドモードも有効化) |
 | StoneWall.Spacing | 4 |
 | StoneWall.Color | (150,148,140) |
+| Roof.GableEnabled | true(Step V-1で新設。falseで全建物が陸屋根に戻る) |
+| Roof.GableMaxStoreys | 2(この階数以下の建物に切妻屋根) |
+| Roof.GableHeight | 6(棟の高さ、stud) |
+| Roof.Overhang | 2(軒の出、stud) |
+| Props.Enabled | true(Step V-1で新設。グリッドモードの街灯・車・木・ベンチのON/OFF) |
+| Props.LampSpacing | 62 |
+| Props.CarsPerRoad | 3 |
+| Props.TreesPerBlock | 5 |
+| Props.BenchesPerBlock | 1 |
 
 ### Config.Round
 | キー | 値 | 備考 |
@@ -106,7 +115,7 @@ StarterPlayer/StarterPlayerScripts
 ### Config.City
 | キー | 値 | 備考 |
 |---|---|---|
-| RoadWidth | 16 | グリッドモードでも共用 |
+| RoadWidth | 24 | グリッドモードでも共用。Step V-2で16→24(石垣・街小物で通行できる場所が道路だけになったため拡幅。瓦礫対策の`Config.Debris.CollideTime`とは独立した、見た目としても採用済みの変更) |
 | RoadLength | 240 | **従来モードの`buildRoads`専用**。グリッドモードは`GRID_TILESIZE`から自前で長さを計算するため未使用 |
 | SidewalkWidth | 4 | |
 | SidewalkHeight | 0.5 | |
@@ -215,6 +224,7 @@ StarterPlayer/StarterPlayerScripts
 | DummyCount | 10 | 上限超過分を代替するダミー破片数 |
 | DummyLifetime | 2 | ダミー破片の寿命(秒) |
 | DummySize | Vector3(1.4,1.4,1.4) | |
+| CollideTime | 1.5 | 本物の瓦礫が発生してから`CanCollide=false`になるまでの秒数(Step V-2で新設) |
 
 ### Config.NPC
 | キー | 値 |
@@ -400,7 +410,7 @@ local GRID_GAP = 12
 maxTemplateDim()  = Config.City.Templates の sizeX/sizeZ の最大値 = 48(学校/大型商業施設)
 GRID_BLOCKSPAN    = maxTemplateDim() * P + GRID_GAP  = 48*2+12 = 108
 GRID_MAXSIZE      = floor(GRID_BLOCKSPAN / (2*P))    = floor(108/4) = 27
-GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 16+108 = 124
+GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 24+108 = 132  -- Step V-2でRoadWidth 16→24
 ```
 
 `GRID_MAXSIZE`は「仕様どおりの`blockSpan/P`」ではなく`blockSpan/(2*P)`を採用している。
@@ -421,15 +431,17 @@ GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 16+108 = 124
 - **既知の簡易実装**: 歩道は全長ストレートなので交差点の上を素通りする(コーナー処理は未実装)
 
 ### 敵を沸かせる場所
-- 街の外周座標 = ±(GRID_SIZE/2) * GRID_TILESIZE = ±248
+- 街の外周座標 = ±(GRID_SIZE/2) * GRID_TILESIZE = ±264
 - 道路の中心線 = (k - GRID_SIZE/2) * GRID_TILESIZE  (k=0..4)
-           = -248, -124, 0, 124, 248
+           = -264, -132, 0, 132, 264
 
-### グリッドモードの生成順序(`CityGenerator.Generate()`内)
+### グリッドモードの生成順序(`CityGenerator.Generate()`内。Step V-1で3・4を追加)
 
 1. `buildRoadGrid(map)` を**先に**実行(道路網を必ず完成させる)
-2. `generateGridSlots()`で128スロットを計算し、`overBudget()`で打ち切られるまで`generateProceduralBuilding`を順に実行
-3. 石垣(`buildStoneWalls`)・街小物(`buildProps`)・手作りテンプレート(`chooseBuildingSource`)は**呼ばれない**(7節参照)
+2. `generateGridSlots()`で128スロットを計算し、`overBudget()`で打ち切られるまで`generateProceduralBuilding`を順に実行。各建物のフットプリント(位置・回転込みの実寸半幅)を集めておく(3・4のめり込み回避に使う。`CityGenerator.Generate()`の戻り値`info`には含めない)
+3. `buildGridStoneWalls(map, footprints)`: 各街区(タイル)の外周(`±GRID_BLOCKSPAN/2`)に沿って石垣を配置。フットプリントと重なる位置(+マージン8)はスキップ。`Destructible`だが`BuildingId`は付けない
+4. `buildGridProps(map, footprints)`: `CityGenerator.GetRoadLines()`の道路網を基準に街灯・駐車車両・木・ベンチを配置(`Config.City.Slots`は使わない)。`CityProp`タグに加え、Step V-2で`Destructible`タグも付与(`BuildingId`は付けない。破壊可能だが全壊判定・破壊率・スナイパー屋上候補には混ざらない)
+5. 手作りテンプレート(`chooseBuildingSource`)は引き続き**呼ばれない**(7節参照。従来モード専用)
 
 ### 従来モード(`USE_GRID_MODE=false`。凍結中・コードは温存)
 
@@ -477,7 +489,7 @@ GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 16+108 = 124
 ## 6. 確定事項
 
 - パーツ数上限: **`Config.Performance.MaxTotalParts = 20000`**
-- グリッドモード(`GRID_SIZE=4`)の実測総パーツ数: **13,500〜15,500**(上限20,000に対して余裕あり)
+- グリッドモード(`GRID_SIZE=4`)の実測総パーツ数: **14,900〜19,300**(上限35000に対して余裕あり。Step V-2で`RoadWidth`拡幅ぶんの街灯増加を含む値。切妻屋根は陸屋根の`buildSlab`より部材が少ないため、建物側は増加分を一部相殺している)
 - ブロックサイズ: **`Config.Block.Size = Vector3(8, 4, 2)`**
 - グリッドサイズ: **`GRID_SIZE = 4`**(`CityGenerator.lua`内のローカル定数)
 - タブレット実機での動作確認: **30fps維持を確認済み**(SETUP.md 6章の判定基準を満たす)
@@ -489,11 +501,11 @@ GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 16+108 = 124
 
 ## 7. 未実装のまま保留(グリッドモード側)
 
-グリッドモードでは以下を**意図的に未実装のまま保留**している(「まず建物と道路だけで動作確認する」方針のため):
+グリッドモードでは以下を**意図的に未実装のまま保留**している:
 
-- **石垣**(`buildStoneWalls`。関数自体は存在するが呼ばれない)
-- **街灯・車・木**(`buildProps`。関数自体は存在するが呼ばれない。ベンチも含む)
 - **手作りテンプレート**(`BuildingTemplates`。`chooseBuildingSource`/`placeTemplateBuilding`/`TemplateValidator`は従来モードのみで使われ、グリッドモードの建物選定は`generateProceduralBuilding`のみでプロシージャル生成に限定)
+
+石垣(`buildGridStoneWalls`)・街灯/車/木/ベンチ(`buildGridProps`)はStep V-1で有効化済み(§3参照)。
 
 これらを組み込む場合は`CityGenerator.Generate()`のグリッド分岐(`if USE_GRID_MODE then ... end`)内に追加実装が必要。
 
@@ -745,7 +757,9 @@ Step4dでバズーカが0.3秒間隔の連射になっても1発ごとに必ず�
 `MaxDistance`を400→140にした根拠(変更しないこと):
 
 - 警官の`AttackRange = 100`より短いと、一方的に撃たれる時間ができる
-- 街のタイルは124stud刻み(道路中心線 -248 / -124 / 0 / 124 / 248)。1区画を道路際から
+- 街のタイルは124stud刻み(道路中心線 -248 / -124 / 0 / 124 / 248。当時の`RoadWidth=16`時点の値。
+  Step V-2で`RoadWidth`を24に拡幅したため現在は132stud刻み(-264/-132/0/132/264)だが、
+  140という結論には大きく影響しないためこの節の数値・射程は変更していない)。1区画を道路際から
   片付けるのに必要な長さがおおよそ124〜140
 - 140なら「1か所に立つ → 1区画を片付ける → 次の交差点へ移る」というリズムになり、
   街全体を回るのに6〜9か所の立ち位置が必要になる
@@ -1299,3 +1313,96 @@ Soldier/Sniperの最大生存数、最大増援回数、最大ヘリ機数、敵
 追加していない。20秒ごとに敵を処理しなければ数が増え続けることを、プレイヤーが選択できる
 プレイスタイル(積極的に処理するか、時間を稼いで後回しにするか)として仕様化している。
 パフォーマンス上の懸念が実機で顕在化した場合は、この節を更新したうえで別途上限を検討する。
+
+## 18. Step V-1 の設計判断(街並みリアル化: パレット・三角屋根・石垣・街小物)
+
+### 18-1. 切妻屋根を`Config.Block.Size.X`(=8)単位で分割する理由
+
+このゲームの根幹は「小さいブロックの集合が爆発でバラバラに吹き飛ぶ」ことであり、巨大な1枚
+パーツは「屋根ごとドンと1個飛ぶ」という最も避けたい壊れ方になる(`SETUP.md` 7-1に同じ趣旨の
+ルールが手作り建物向けに明記されている)。棟方向の長さが8で割り切れない場合(例: 「小屋」の
+sizeZ=20)は、末尾の1枚だけ残りの長さ(20→8+8+4)にする。均等分割にすると分割ロジックが
+複雑になる割に見た目の効果が薄いため、単純さを優先した。
+
+軒(overhang)は勾配のある2面(eaves)にのみ出し、棟(ridge)方向の両端(妻壁側)には出していない。
+指示書には「壁の外側へはみ出させる」としか書かれておらず妻壁側の扱いは未規定だったため、
+実装をシンプルに保てる2面のみの方針を採用した。
+
+### 18-2. 切妻屋根の建物を屋上候補から外した理由
+
+`EnemyManager.findRooftopCandidates`は棟(BuildingId)ごとの最高部にスナイパーを立たせるが、
+切妻屋根の最高部は棟(ridge)の稜線=斜面の頂点になる。ここにスナイパーを立たせるとめり込む・
+浮く・滑るといった見た目の破綻が起きるため、`HasGableRoof`属性(`CityGenerator`が建物の
+`Model`に付与)を持つ建物のパーツを候補から丸ごと除外する。結果としてグリッドモードで屋上
+候補になるのは陸屋根の「高層ビル」(storeys>=3)のみになるが、低い小屋よりも高層ビルの屋上に
+スナイパーがいるほうが設計としても自然なため、副作用ではなく改善として扱う。
+候補ゼロ時は既存の`spawnArrivalUnits`が地上(`jitterPoint`)へフォールバックする(変更不要)。
+
+### 18-3. 街小物を破壊可能にしなかった理由(Step V-2で覆された。§19-3参照)
+
+Step V-1時点では、街灯・駐車車両・木・ベンチ(`buildGridProps`)は石垣と違って`Destructible`
+タグを付けず、爆発しても壊れない仕様だった。「建物破壊率」「全壊ボーナス」の集計対象が
+実質的に増減し、リザルトの数値の意味が変わってしまうことを懸念しての判断だったが、
+実機プレイテストで「目の前の車が爆発で無傷なのは違和感が強い」と判明したため、
+Step V-2で破壊可能に変更した。判断が覆った経緯と、集計を壊さない実装方法は§19-3参照。
+
+### 18-4. 石垣に`BuildingId`を付けない理由
+
+石垣が建物の全壊判定や建物破壊率の集計に混ざると、リザルトの数値の意味が変わってしまう
+(石垣を壊しただけで建物破壊率が動いて見える、等)ため、`Destructible`タグは付けつつ
+`BuildingId`属性は意図的に付けていない(従来モードの`buildStoneWalls`と同じ方針)。
+
+## 19. Step V-2 の設計判断(屋根の向き・瓦礫の当たり判定・小物の破壊)
+
+Step V-1の実機プレイテストで見つかった3件の仕上げ。新機能の追加ではない。
+
+### 19-1. 切妻屋根の棟の向きは`rotationY`(=正面と平行)を基準にする
+
+Step V-1の実装は棟の向きを`sizeX`/`sizeZ`の長辺基準(`sz > sx`)で決めており、テンプレートに
+よっては道路から見て三角の妻面が見える(棟が道路と垂直になる)バグがあった。
+
+現実の街並みは平入り(道路から見えるのは長い屋根の斜面)が基本で、この向きの統一が
+街並みの整った印象を作る主要因のため、**棟は建物の正面(道路に面した側)と常に平行**にする
+よう修正した。実装上は、`buildBuilding`の正面壁(ドアのある壁)が常にローカルX方向に伸びる
+向きで組まれており、`slot.rotationY`による回転は`baseCf`を通じて壁・屋根へ一律に適用される
+ため、**棟をローカル座標で常にX軸方向に固定するだけ**で済んだ(`rotationY`を個別に参照する
+コードは不要)。グリッドモード・従来モードの両方で`slot.rotationY`が同じ形で`baseCf`に
+反映されるため、この修正はモード分岐なしで両方に正しく効く。
+
+### 19-2. 瓦礫の当たり判定は時間経過で切る(速度監視は採らない)
+
+石垣・街小物がDestructibleになり通行できる場所が道路だけになった結果、瓦礫が道路上に
+堆積してプレイヤーが物理的に通れなくなる問題が発生した。
+
+対策として、瓦礫(本物のみ。ダミー破片は元から`CanCollide=false`)が発生してから
+`Config.Debris.CollideTime`(既定1.5秒)後に`CanCollide=false`にする方式を採用した。
+「速度を監視して止まったら切る」方式は採らなかった: (1) 1回の爆発で最大500個の本物瓦礫が
+飛びうるゲームで、毎フレーム全瓦礫の速度を監視するコストが跳ねる、(2) 斜面で滑り続ける・
+他の瓦礫の上で微振動するなど、「止まった」の判定自体が安定しない。時間経過であれば
+既存の寿命管理(FIFOキュー・`fadeAndRemove`)と同じ考え方で扱え、実装も`task.delay`1行で済む。
+
+これにより、通行問題の対症療法だった`Config.Performance.DebrisLifetime`の一時的な短縮(8→3)
+は不要になり、8に戻せた。一方`Config.City.RoadWidth`の拡幅(16→24)は瓦礫対策とは独立した
+見た目の改善として採用済みのため、そのまま維持している(§2-2参照)。
+
+### 19-3. 街小物に専用スコアキーを作らなかった理由
+
+街小物(街灯・車・木・ベンチ)を破壊可能にするにあたり、専用のスコアキー
+(`Config.Score.Prop`等)は作らず、既存の`Config.Score.Block`(10点)をそのまま適用した。
+
+「小物狩りが最適解になるのでは」という懸念は、検討の結果**成立しないと判断**した:
+小物は街全体に分散して配置されており、移動時間のほうが高くつく。建物は1か所に固まって
+いるため、同じ時間なら建物を壊すほうが必ず効率がよい。したがって小物専用のバランス調整は
+不要で、「読む場所のないキー・振っても意味の変わらないキーは作らない」という設計原則
+(§12-1)に従い、新しいキーを追加しなかった。
+
+### 19-4. 街小物・石垣に`BuildingId`を付けない理由(再確認)
+
+`BuildingId`は(1)全壊ボーナス、(2)建物破壊率、(3)`EnemyManager.findRooftopCandidates`の
+屋上候補探索の3つに使われる。特に(3)が危険で、`BuildingId`を付けると街灯の上にスナイパーが
+立ちうる。街小物を破壊可能にした際も、石垣(§18-4)と完全に同じ扱い(`Destructible`あり・
+`BuildingId`なし)にすることで、「建物以外の壊せるもの」の扱いを統一した。
+実装は`buildGridProps`が街小物を専用の`Model`(「街小物」)にまとめて生成したあと、
+その配下の全`BasePart`へ一括で`Destructible`タグを付ける方式にしている。
+`buildStreetlight`/`buildCar`/`buildTree`/`buildBench`は従来モードの`buildProps`とも
+共有しているヘルパーのため、ヘルパー自体は無改修のまま(タグ分岐を入れていない)。

@@ -13,8 +13,9 @@ local Config = {}
 -- ▼ パフォーマンス上限(実機テストで調整する。SETUP.md参照) --------
 Config.Performance = {
 	-- グリッド街(USE_GRID_MODE=true, GRID_SIZE=4=128スロット)を収めるため引き上げ。
-	-- ブロック粗大化(Config.Block.Size)で1棟あたりのパーツ数を約1/4に減らした前提の値。重ければ15000へ戻す
-	MaxTotalParts = 20000, -- 生成直後の総パーツ数上限(超過したら生成を打ち切り警告)
+	-- ブロック粗大化(Config.Block.Size)で1棟あたりのパーツ数を約1/4に減らした前提の値。重ければ15000へ戻す。
+	-- Step V-2でさらに35000へ引き上げ(RoadWidth拡大・石垣/街小物のDestructible化ぶんの余裕を持たせる)
+	MaxTotalParts = 35000, -- 生成直後の総パーツ数上限(超過したら生成を打ち切り警告)
 	MaxUnanchoredParts = 1000, -- 同時に物理挙動する瓦礫の上限(カクつくなら600へ)
 	DebrisLifetime = 8, -- 瓦礫が透明化を始めるまでの秒数(カクつくなら5へ)
 }
@@ -35,51 +36,95 @@ Config.Visual = {
 	TerrainEnabled = true, -- 草地Terrainの生成ON/OFF
 	TerrainDecoration = true, -- 揺れる草(重い場合はfalseに。効果大)
 
-	-- 建物パレット(棟ごとに1つ選ばれる。壁の材質・色/窓枠の差し色/屋根)
+	-- 建物パレット(棟ごとに1つ選ばれる。壁の材質・色/窓枠の差し色/屋根)。
+	-- Step V-1: 壁は低彩度(白・ベージュ・くすんだレンガ・グレー)、屋根は全パレット共通で
+	-- 濃いグレー〜黒(RGB各値60以下)に寄せている。この壁・屋根の明暗差が「町らしさ」の主要因
 	BuildingPalettes = {
 		{
-			name = "砂岩の家",
-			material = Enum.Material.Sandstone,
-			wallColors = {
-				Color3.fromRGB(222, 204, 168),
-				Color3.fromRGB(233, 217, 184),
-				Color3.fromRGB(206, 186, 152),
-			},
-			frameColor = Color3.fromRGB(72, 122, 188), -- 青い窓枠
-			roofMaterial = Enum.Material.Slate,
-			roofColor = Color3.fromRGB(182, 122, 92),
-		},
-		{
-			name = "コンクリビル",
+			name = "白い家",
 			material = Enum.Material.Concrete,
 			wallColors = {
-				Color3.fromRGB(178, 178, 184),
-				Color3.fromRGB(160, 160, 166),
-				Color3.fromRGB(142, 144, 150),
+				Color3.fromRGB(238, 236, 230),
+				Color3.fromRGB(230, 228, 222),
+				Color3.fromRGB(222, 220, 214),
 			},
-			frameColor = Color3.fromRGB(235, 235, 235), -- 白い窓枠
+			frameColor = Color3.fromRGB(60, 60, 64), -- 濃いグレーの窓枠
 			roofMaterial = Enum.Material.Slate,
-			roofColor = Color3.fromRGB(92, 96, 106),
+			roofColor = Color3.fromRGB(46, 48, 52),
+		},
+		{
+			name = "ベージュの家",
+			material = Enum.Material.Sandstone,
+			wallColors = {
+				Color3.fromRGB(224, 210, 182),
+				Color3.fromRGB(216, 201, 172),
+				Color3.fromRGB(208, 193, 164),
+			},
+			frameColor = Color3.fromRGB(110, 80, 55), -- 茶系の窓枠
+			roofMaterial = Enum.Material.Slate,
+			roofColor = Color3.fromRGB(48, 42, 36),
 		},
 		{
 			name = "レンガの店",
 			material = Enum.Material.Brick,
 			wallColors = {
-				Color3.fromRGB(172, 96, 76),
-				Color3.fromRGB(186, 110, 86),
-				Color3.fromRGB(152, 84, 66),
+				Color3.fromRGB(150, 90, 76),
+				Color3.fromRGB(142, 84, 70),
+				Color3.fromRGB(134, 78, 64),
 			},
-			frameColor = Color3.fromRGB(168, 124, 76), -- 木目色の窓枠
+			frameColor = Color3.fromRGB(225, 220, 210), -- オフホワイトの窓枠
 			roofMaterial = Enum.Material.Slate,
-			roofColor = Color3.fromRGB(70, 70, 76),
+			roofColor = Color3.fromRGB(50, 50, 55),
+		},
+		{
+			name = "コンクリビル",
+			material = Enum.Material.Concrete,
+			wallColors = {
+				Color3.fromRGB(168, 168, 172),
+				Color3.fromRGB(152, 152, 156),
+				Color3.fromRGB(138, 138, 142),
+			},
+			frameColor = Color3.fromRGB(50, 50, 54), -- 濃いグレーの窓枠
+			roofMaterial = Enum.Material.Concrete,
+			roofColor = Color3.fromRGB(44, 45, 48),
+		},
+		{
+			name = "ガラスビル",
+			material = Enum.Material.Metal,
+			wallColors = {
+				Color3.fromRGB(176, 188, 198),
+				Color3.fromRGB(164, 176, 188),
+				Color3.fromRGB(152, 164, 176),
+			},
+			frameColor = Color3.fromRGB(28, 34, 48), -- 濃紺の窓枠
+			roofMaterial = Enum.Material.Metal,
+			roofColor = Color3.fromRGB(40, 42, 48),
 		},
 	},
 
-	-- 石垣(区画の縁の低い壁。壊せる=Destructible)
+	-- 石垣(区画の縁の低い壁。壊せる=Destructible)。グリッドモードでは
+	-- buildGridStoneWalls が使用する(Step V-1で有効化)
 	StoneWall = {
 		Enabled = true,
 		Spacing = 4, -- ブロック間隔。4=隙間なし、8にすると密度半分(パーツ削減)
 		Color = Color3.fromRGB(150, 148, 140),
+	},
+
+	-- 切妻屋根(三角屋根)。低層建物(storeys <= GableMaxStoreys)の屋根をWedgePartで作る(Step V-1)
+	Roof = {
+		GableEnabled = true, -- falseで全建物が従来の平らな屋根に戻る
+		GableMaxStoreys = 2, -- この階数以下の建物に切妻屋根を付ける(超えると陸屋根=buildSlab)
+		GableHeight = 6, -- 棟の高さ(stud)
+		Overhang = 2, -- 軒の出(stud)。壁の外側へこの分だけはみ出させる
+	},
+
+	-- 街小物(街灯・駐車車両・木・ベンチ)。グリッドモードでは buildGridProps が使用する(Step V-1)
+	Props = {
+		Enabled = true,
+		LampSpacing = 62, -- 街灯の間隔(stud)
+		CarsPerRoad = 3, -- 道路1本あたりの駐車車両の台数
+		TreesPerBlock = 5, -- 街区1つあたりの木の本数
+		BenchesPerBlock = 1, -- 街区1つあたりのベンチの数
 	},
 }
 
@@ -109,8 +154,11 @@ Config.RowsPerStorey = 2
 
 -- ▼ 街並み生成 --------------------------------------------------------
 Config.City = {
-	-- 道路(十字路1つでフィールドを4区画に分ける)
-	RoadWidth = 16,
+	-- 道路(十字路1つでフィールドを4区画に分ける)。
+	-- Step V-2: 16→24。石垣・街小物で通行できる場所が道路だけになったため道幅を広げた。
+	-- 瓦礫の当たり判定タイムアウト(Config.Debris.CollideTime)とは独立した、見た目としても
+	-- 採用済みの変更(街として自然になった)
+	RoadWidth = 24,
 	RoadLength = 240,
 	SidewalkWidth = 4,
 	SidewalkHeight = 0.5,
@@ -250,6 +298,12 @@ Config.Debris = {
 	DummyCount = 10, -- 上限超過分の見た目を代替するダミー破片の生成数(固定・軽量)
 	DummyLifetime = 2, -- ダミー破片が消え始めるまでの秒数(+FadeTimeで完全に消える)
 	DummySize = Vector3.new(1.4, 1.4, 1.4), -- ダミー破片1個の大きさ
+
+	-- 瓦礫が発生してから当たり判定(CanCollide)を失うまでの秒数(Step V-2)。
+	-- 飛んでいる間は当たり判定を残して衝突の迫力を保ちつつ、時間経過で切ることで
+	-- 瓦礫が道を塞がないようにする。速度監視ではなく時間経過にしている理由は
+	-- CURRENT_SPEC.md参照(コスト・「止まった」判定の不安定さを避けるため)
+	CollideTime = 1.5,
 }
 
 -- ▼ NPC --------------------------------------------------------------

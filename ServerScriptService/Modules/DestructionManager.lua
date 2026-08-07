@@ -32,6 +32,7 @@ local MAX_REAL_PER_EXPLOSION = debrisCfg.MaxRealPerExplosion or 30 -- 1爆発あ
 local DUMMY_COUNT = debrisCfg.DummyCount or 10 -- 上限超過分を代替するダミー破片の数
 local DUMMY_LIFETIME = debrisCfg.DummyLifetime or 2 -- ダミー破片の寿命(秒)
 local DUMMY_SIZE = debrisCfg.DummySize or Vector3.new(1.4, 1.4, 1.4)
+local COLLIDE_TIME = debrisCfg.CollideTime or 1.5 -- 本物の瓦礫が当たり判定を失うまでの秒数(Step V-2)
 
 local DestructionManager = {}
 local rng = Random.new()
@@ -174,6 +175,18 @@ local function applyBlastImpulse(part, center, radius, speedScale)
 		rng:NextNumber(-1, 1), rng:NextNumber(-1, 1), rng:NextNumber(-1, 1)) * mass * 2)
 end
 
+-- 瓦礫が発生してからCOLLIDE_TIME秒後に当たり判定を失わせる(Step V-2)。
+-- 石垣・街小物のDestructible化で通行できる場所が道路だけになり、瓦礫が積もると
+-- 物理的に通れなくなる問題への対処。速度監視(「止まったら切る」)は採らない:
+-- 毎フレーム全瓦礫の速度を見るコストが跳ねることと、斜面での滑り・微振動で
+-- 「止まった」の判定が安定しないため。時間経過であれば既存の寿命管理と同じ考え方で扱える。
+-- part.Parentを見てから切るので、CollideTimeがDebrisLifetimeより長くて先に消えていても安全
+local function loseCollision(part)
+	if part.Parent then
+		part.CanCollide = false
+	end
+end
+
 --------------------------------------------------------------------
 -- 本物パーツ: 物理化(Unanchored)して吹き飛ばす
 -- 爆心地に近い順に MAX_REAL_PER_EXPLOSION 個まで(C案ハイブリッド)
@@ -192,6 +205,7 @@ local function destroyBlockReal(part, ctx)
 	applyBlastImpulse(part, ctx.position, ctx.radius, 1)
 	registerDestruction(part, ctx)
 	enqueueDebris(part, DEBRIS_LIFETIME)
+	task.delay(COLLIDE_TIME, loseCollision, part) -- 飛行中は当たり判定あり、静止する頃合いで切る
 end
 
 --------------------------------------------------------------------

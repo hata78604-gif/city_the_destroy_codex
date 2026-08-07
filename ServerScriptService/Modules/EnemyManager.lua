@@ -1331,6 +1331,9 @@ end
 -- 現在workspace.Mapに残っているBuildingId付きBasePartから、棟(BuildingId)ごとの屋上候補を集める
 -- (Step5-2)。CityGeneratorには手を入れず、破壊で減った後の残存パーツだけを見る。
 -- 候補は各棟の最高部(topY = Position.Y + Size.Y/2)1つに絞り、dropPointに近い順に並べて返す。
+-- 切妻屋根(Step V-1)の建物は斜面の頂点にスナイパーが立つと破綻するため除外する:
+-- CityGeneratorが建物のModelに付ける HasGableRoof 属性を、そのパーツの親(=建物のModel。
+-- グリッドモードの手続き生成建物ではブロックは必ずそのbuildingのModel直下に置かれる)で確認する。
 -- 戻り値の各要素: { x, z, topY, dist }
 local function findRooftopCandidates(dropPoint)
 	local map = workspace:FindFirstChild("Map")
@@ -1341,7 +1344,7 @@ local function findRooftopCandidates(dropPoint)
 	for _, part in map:GetDescendants() do
 		if part:IsA("BasePart") then
 			local buildingId = part:GetAttribute("BuildingId")
-			if buildingId then
+			if buildingId and not (part.Parent and part.Parent:GetAttribute("HasGableRoof")) then
 				local topY = part.Position.Y + part.Size.Y / 2
 				local current = best[buildingId]
 				if not current or topY > current.topY then

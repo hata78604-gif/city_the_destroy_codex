@@ -658,7 +658,11 @@ Step5-1実装後の実機プレイテストで判明した2件の問題(HUD重�
   - 武器をしまったとき全スロットが通常表示に戻ること
   - エアストライクのクールダウン中でも装備中であることが黄色太枠で判別できること
 
-# 旧部隊の撤退演出改善(Step 5-2。2026-08-07)
+# 旧部隊の撤退演出改善(Step 5-1b。旧称Step 5-2。2026-08-07)
+
+> **命名注記**: この節は実装当時「Step 5-2」と呼んでいたが、その名称は元々スナイパー追加用に
+> 予約されていた(上記「次ステップへの申し送り」参照)ため、後日「Step 5-1b」へ改称した。
+> 実装内容・判断は無変更。
 
 ## 目的
 
@@ -693,7 +697,7 @@ Step5-0の撤退演出(危険度昇格時、旧部隊がその場でフェード
 
 ### `CURRENT_SPEC.md` / `SETUP.md`
 
-- `CURRENT_SPEC.md`: §13-2/§13-4を新演出に合わせて修正し、設計判断を`## 15. Step 5-2の設計判断`
+- `CURRENT_SPEC.md`: §13-2/§13-4を新演出に合わせて修正し、設計判断を`## 15. Step 5-1bの設計判断`
   として新設(方向計算・終了条件・二重起動防止・`CountAlive`等が自動的に対象外になる理由を記録)
 - `SETUP.md`: Phase 9のチェックリストを新演出向けに更新(街外周へ移動する見た目・
   残留しないことの確認を追加)。Phase 10の★2昇格時の記述も追従
@@ -713,3 +717,188 @@ Step5-0の撤退演出(危険度昇格時、旧部隊がその場でフェード
 ## ユーザー手作業
 
 - `SETUP.md` **Phase 9**を上から順に確認
+
+---
+
+# ★2 スナイパー追加(Step 5-2。2026-08-07)
+
+## 目的
+
+★2部隊(Soldier×4・ヘリ輸送)へスナイパー2人を追加した。既存の軍用ヘリが投下地点へ到着した
+瞬間に屋上へ出現させ、長い予告後に固定射線を撃つ「動いて避ける敵」にした。
+兵士4人・ヘリ輸送・旧部隊撤退・既存攻撃(警官・兵士)の挙動はいずれも維持している。
+
+## 実装したもの
+
+### `Config.lua`
+
+- `EnemyTypes.Sniper`を新設(`Movement="stationary"`・`AttackType="sniper"`・`AttackRange=500`・
+  `Telegraph=2.0`・`AttackInterval=3.0`・`TimePenalty=2`・`ScoreReward=500`。`SpawnY`は未設定)
+- `Stages[2].Squad[1]`(Soldier×4・`transport="helicopter"`)へ
+  `arrivalSpawns = { { type="Sniper", count=2, placement="rooftop" } }`を追加。
+  スナイパー専用の2機目ヘリは出さない
+
+### `EnemyManager.lua`
+
+- `findRooftopCandidates(dropPoint)`: `workspace.Map`の`BuildingId`付き`BasePart`を棟ごとに
+  グループ化し、各棟の最高部(`topY`)をdropPoint近い順に返す(`CityGenerator`は無変更)
+- `spawnArrivalUnits(squadId, arrivalSpawns, dropPoint)`: ヘリ到着直後・同一フレームで
+  arrivalSpawnsを生成。屋上候補が2棟未満のぶんは地上フォールバック(既存`jitterPoint`)
+- `decrementPending(squadId)`: pendingDeploymentsの減算を共通化(Soldier・Sniper両方から使用)
+- `updateStationaryEnemy(enemy, dt)`: 位置変更なし。標的更新・範囲内判定・攻撃開始のみ
+- `fireSniper` / `resolveSniperShot`: 予告開始時にorigin/direction/rayEndを確定し、
+  Telegraph秒後もそれを再利用する固定射線攻撃。判定は対象Characterのみを`Include`にした
+  `Raycast`で行い、`raycastMap()`(Map遮蔽判定)を呼ばない
+- `deployByHelicopter`: yield前のpending加算にarrivalSpawns分を合算。到着後にarrivalSpawnsを
+  生成してからSoldier降下ループへ進む。`spawnEnemy("Soldier", ...)`のハードコードを
+  `spawnEnemy(entry.type, ...)`へ一般化(現状の★2は`entry.type=="Soldier"`なので挙動不変)
+- `updateEnemy`: 分岐順を`deploying → road → stationary → direct`に変更
+
+### `CURRENT_SPEC.md` / `SETUP.md`
+
+- `CURRENT_SPEC.md`: §15の見出しを`Step 5-2`→`Step 5-1b`へ改称(命名衝突の解消。注記を追加)。
+  新設計判断を`## 16. Step 5-2の設計判断(★2 スナイパー追加)`として追加
+- `SETUP.md`: Phase 9見出し・本文の`Step5-2`表記を`Step5-1b`へ統一。★2確認項目として
+  `Phase 11: ★2 スナイパー2人(Step 5-2)`を新設
+
+## pendingDeploymentsの管理
+
+`deployByHelicopter`はyieldする前(`heliFlyTo`呼び出し前)に`entry.count`(Soldier4)と
+`arrivalSpawns`内の全`count`(Sniper2)を合算した6を一括加算する。デクリメントは
+`decrementPending(squadId)`に共通化し、Sniperは`spawnArrivalUnits`内で1体ごとに、Soldierは
+既存の降下ループ内で1体ごとに呼ぶ。`spawnEnemy`が`nil`を返しても(`systemDisabled`等)
+その個体ぶんは必ず消費してwarnを出すため、pending残留による`CountAlive`誤判定は起きない。
+
+## 固定射線・遮蔽物貫通の実装
+
+予告"開始"時点で`origin`(`markerAnchor.Position`)・`direction`(標的への単位ベクトル)・
+`rayEnd`(500stud先)をクロージャに固定し、Telegraph(2秒)後の判定でも再計算しない。
+赤い予告線は既存`enemyAim`を流用し、`to`にプレイヤー位置ではなく`rayEnd`を渡すことで
+線が途切れず500stud先まで伸びる(`EffectsClient.client.lua`は無変更)。
+
+遮蔽物貫通は、警官・兵士が使う`raycastMap()`(Mapへのraycast)を一切呼ばず、代わりに
+`RaycastParams.FilterType=Include`・`FilterDescendantsInstances={対象Character}`の
+`Raycast`だけを飛ばすことで実現した。建物・瓦礫・他の敵・NPCはそもそも判定対象に
+含まれないため、独自の「命中幅」ロジックを足さずにRobloxの細いRaycastがそのまま
+当たり判定になる。
+
+## Studio確認結果と未解決の警告・エラー
+
+- 構文・型チェック: `luau-lsp analyze`(ローカルに展開して実行)で`Config.lua`/`EnemyManager.lua`
+  に新規の警告・エラーは無いことを確認済み(既存の`EffectsClient.client.lua`の
+  未使用変数警告のみが残るが、今回の変更とは無関係)
+- **Studio実機での動作確認は未実施**(このセッションではRojo経由の実プレイテストを行っていない)。
+  `SETUP.md` **Phase 11**のチェックリストに沿った確認がユーザー側の作業として残っている
+
+## 次ステップへの申し送り
+
+- `SETUP.md` **Phase 11**を上から順にStudioで確認すること。特に「2人がほぼ同時に出現」
+  「別々の建物の屋上」「横移動しても線が追尾しない」「遮蔽物越しでも命中」「屋上不足時の
+  地上フォールバック」を重点的に見る
+- 屋根だけ破壊されてスナイパーが空中に浮いたまま残るケースは今回未対応(意図的なスコープ外)。
+  実機で頻発して見た目上の問題になった場合のみ、「足元支持なし→通常`killEnemy`でラグドール化」
+  を後続の小改修として検討する
+- `Telegraph=2.0`が簡単すぎる(避けやすすぎる)と実機で感じた場合は`1.5`への引き下げを検討する
+  (`Config.lua`のコメントに記載済み)
+
+## ユーザー手作業
+
+- `SETUP.md` **Phase 11**を上から順に確認し、特に以下を重点的に見る:
+  - ★2昇格時にヘリが1機だけ来て、到着と同時にスナイパー2人が出現すること
+  - スナイパーが屋上/地上から一切移動しないこと
+  - 赤線が約500stud先まで伸び、横移動で追尾しないこと
+  - 遮蔽物越しでも線上にいれば命中すること
+  - 屋上候補が足りない状況(建物を破壊して作る)でも2人とも正しく配置されること
+  - 出力ウィンドウに新しい赤いエラーが出ないこと
+
+---
+
+# ★2定期増援化(全滅非依存の増援。2026-08-07)
+
+## 目的
+
+★2の再派遣条件を「部隊全滅後」から「20秒ごとの定期増援」へ変更した。敵の生存数に関係なく、
+20秒ごとに同じヘリ編成(Soldier×4 + Sniper×2)を無制限に追加する。★1の「全滅後20秒で再派遣」は
+従来どおり維持している。全滅を待たずに増援が続くことで、プレイヤーが「敵処理を後回しにして
+建物破壊を優先する」か「先に敵を片付ける」かを選べるプレイスタイルの幅を作る狙い。
+
+## 実装したもの
+
+### `Config.lua`
+
+`Stages[2]`から`RespawnDelay = 20`を削除し、`ReinforcementInterval = 20`を追加した。
+`Squad`定義(Soldier×4・ヘリ輸送・arrivalSpawnsのSniper×2)は無変更。`Stages[1]`の
+`RespawnDelay = 20`も無変更。
+
+### `ThreatManager.lua`
+
+- モジュールローカルに`nextReinforcementAt`(定期増援の次回派遣時刻。`ReinforcementInterval`を
+  持たない段階ではnil)を新設
+- `promote(n)`: 初回`DeploySquad`呼び出しの直後に、新段階の`def.ReinforcementInterval`の有無で
+  `nextReinforcementAt`を設定/nilリセットする。段階が変わるたびに必ず実行されるため、
+  ★2→★3のような昇格が起きた瞬間に★2用のタイマーが自動的に無効化される(専用の停止処理は不要)
+- `monitorLoop()`: 閾値判定(`promote`呼び出し)の直後を、`stages[stage].ReinforcementInterval`の
+  有無で`if`/`elseif`の排他分岐にした。ある場合(★2)は`CountAlive`を一切見ず、
+  `os.clock() >= nextReinforcementAt`だけで`DeploySquad(currentSquadId, def.Squad)`を呼び、
+  `squadSeq`/`currentSquadId`/`waitingRespawn`には触れない。無い場合(★1)は既存の
+  `CountAlive==0`→`RespawnDelay`→新`squadId`の全滅再派遣をそのまま維持
+- `Start()`/`Stop()`/`Clear()`に`nextReinforcementAt = nil`を追加(ラウンドをまたいで
+  定期増援タイマーが持ち越されないようにする安全弁)
+- `roundToken`/`respawnToken`/`cancelPendingRespawn()`は無変更(★1の全滅後再派遣・ラウンド境界の
+  安全性に引き続き必要なため削除していない)
+
+### `CURRENT_SPEC.md` / `SETUP.md`
+
+- `CURRENT_SPEC.md`: §1のThreatManager説明とConfig表(Stages行)を更新し、新設計判断を
+  `## 17. ★2定期増援(全滅非依存の増援)の設計判断`として追加。§14-2に「★2は後日この方式へ
+  移行した」旨の注記を追加
+- `SETUP.md`: Phase 10の「撃破・再派遣」を新方式向けに修正し、詳細確認を`Phase 12`として新設。
+  Phase 11(スナイパー)の「★2部隊全滅後、RespawnDelay経過で再派遣」という記述(旧方式の説明のまま
+  残っていた)を削除・Phase 12参照に修正。「ゲームバランスの調整」節に`ReinforcementInterval`の説明を追加
+
+## `monitorLoop`の分岐
+
+既存の全滅再派遣ブロック(`if currentSquadId and not waitingRespawn and CountAlive(...)==0 then`)を
+`elseif`に変え、その直前に`if def and def.ReinforcementInterval then ... `という定期増援ブロックを
+追加した。両者は排他(`stages[stage]`が`ReinforcementInterval`を持つかどうかで一意に決まる)なので、
+同じ段階で両方の再派遣ロジックが同時に走ることはない。段階番号のベタ書き分岐(`if stage==2`)は使っていない。
+
+## ★2増援で`squadSeq`/`currentSquadId`を変更していないこと
+
+`monitorLoop`の定期増援ブロックは`currentSquadId`をそのまま`DeploySquad`へ渡すだけで、
+`squadSeq += 1`のインクリメントも`currentSquadId`の再代入も行わない。★2にいる間の全ての増援
+(初回・2波目・3波目…)が同じ`squadId`に属する。これにより将来★3が実装されたとき、
+`RetreatSquad(previousSquadId)`を1回呼ぶだけで★2期間中の全波・全飛行中ヘリを撤退・
+キャンセル対象にできる(増援ごとに`squadId`を変えると最後の1波しか撤退できなくなるため、
+これは§2の急所どおり必須の設計判断)。
+
+## Stop/Clear/昇格時の定期増援タイマー解除方法
+
+`nextReinforcementAt`は3箇所でリセットされる: `ThreatManager.Start()`(ラウンド開始時)、
+`ThreatManager.Stop()`(ラウンド終了時)、`ThreatManager.Clear()`(次ラウンド準備時)。
+加えて`promote()`が段階が変わるたびに必ず新段階の定義に基づいて上書きする(★2→★3昇格時、
+★3が`ReinforcementInterval`を持たなければ自動的にnilへ戻る)。専用の「増援停止」関数は
+新設していない(既存のラウンド境界メソッドと`promote()`の代入だけで足りるため)。
+
+## Studioテスト結果と新しい警告・エラーの有無
+
+- 構文・型チェック: `luau-lsp analyze`(ローカルに展開して実行)で`Config.lua`/`ThreatManager.lua`に
+  新規の警告・エラーは無いことを確認済み(既存の`EffectsClient.client.lua`の未使用変数警告のみが
+  残るが、今回の変更とは無関係)
+- **Studio実機での動作確認は未実施**。`SETUP.md` **Phase 12**のチェックリストに沿った確認が
+  ユーザー側の作業として残っている
+
+## 次ステップへの申し送り
+
+- `SETUP.md` **Phase 12**を上から順にStudioで確認すること。特に「敵を倒さず20秒待っても
+  ヘリが来る」「1波目〜3波目が同じ`SquadId`」「★1は従来どおり全滅待ち」を重点的に見る
+- 人数・波数の上限は意図的に未実装(§4-7・`CURRENT_SPEC.md` §17-7参照)。実機でパフォーマンスが
+  悪化するようなら、上限追加を別途検討する
+
+## ユーザー手作業
+
+- `SETUP.md` **Phase 12**を上から順に確認し、特に以下を重点的に見る:
+  - 敵を1体も倒さずに20秒待っても次のヘリが来ること
+  - 1〜3波目の敵のExplorer上の`SquadId`属性がすべて同じであること
+  - ★1では従来どおり全滅しないと再派遣されないこと
+  - 出力ウィンドウに新しい赤いエラーが出ないこと

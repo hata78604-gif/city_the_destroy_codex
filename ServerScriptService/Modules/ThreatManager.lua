@@ -21,6 +21,10 @@ local stage = 0
 local squadSeq = 0
 local currentSquadId = nil
 local waitingRespawn = false
+-- 定期増援(全滅を待たない再派遣)の次回派遣時刻。ReinforcementIntervalを持つ段階でのみ使う値で、
+-- 持たない段階(★1)ではnil。promote()で段階が変わるたびに必ず上書きされるため、
+-- ★3以降へ昇格した瞬間に★2用の値は自動的に無効化される
+local nextReinforcementAt = nil
 local roundToken = 0 -- Clear()のたびに+1。task.delay(RespawnDelay待機)の世代確認に使う
 -- 再派遣予約(RespawnDelay待機)だけを無効化する世代トークン(Step5-0)。roundTokenと役割が違う:
 -- roundTokenはラウンドをまたぐ非同期処理を無効化し、respawnTokenは同じラウンド内で
@@ -76,6 +80,14 @@ local function promote(n)
 	end
 
 	deps.enemies.DeploySquad(currentSquadId, def.Squad)
+
+	-- 定期増援タイマーの(再)設定。新段階がReinforcementIntervalを持たなければnilに戻す
+	-- (これにより★2→★3昇格のような場合、★2用の次回時刻が確実に無効化される)
+	if def.ReinforcementInterval then
+		nextReinforcementAt = os.clock() + def.ReinforcementInterval
+	else
+		nextReinforcementAt = nil
+	end
 end
 
 --------------------------------------------------------------------
@@ -93,7 +105,15 @@ local function monitorLoop()
 				promote(stage + 1)
 			end
 
-			if currentSquadId and not waitingRespawn
+			local def = stages[stage]
+			if def and def.ReinforcementInterval then
+				-- 定期増援方式: 生存数を見ず、一定間隔で同じsquadIdへSquad一式を追加派遣する。
+				-- waitingRespawn/squadSeqには触れない(全滅再派遣方式とは排他)
+				if currentSquadId and os.clock() >= nextReinforcementAt then
+					deps.enemies.DeploySquad(currentSquadId, def.Squad)
+					nextReinforcementAt = os.clock() + def.ReinforcementInterval
+				end
+			elseif currentSquadId and not waitingRespawn
 				and deps.enemies.CountAlive(currentSquadId) == 0 then
 				-- 二重派遣防止ガード。CheckIntervalが1秒なので、これが無いと
 				-- 「生存者0」を毎秒検出してRespawnDelay秒の間に何度も派遣されてしまう
@@ -132,6 +152,7 @@ function ThreatManager.Start()
 	stage = 0
 	squadSeq = 0
 	currentSquadId = nil
+	nextReinforcementAt = nil
 	cancelPendingRespawn()
 	running = true
 	roundStartClock = os.clock()
@@ -150,6 +171,7 @@ end
 
 function ThreatManager.Stop()
 	running = false
+	nextReinforcementAt = nil
 	cancelPendingRespawn()
 	deps.enemies.SetAggressive(false)
 end
@@ -160,6 +182,7 @@ function ThreatManager.Clear()
 	stage = 0
 	squadSeq = 0
 	currentSquadId = nil
+	nextReinforcementAt = nil
 	cancelPendingRespawn()
 end
 

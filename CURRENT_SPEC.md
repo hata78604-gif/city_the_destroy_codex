@@ -49,7 +49,7 @@ StarterPlayer/StarterPlayerScripts
   - **降車(`DeployOnArrive`。Step3)**: `etype.DeployOnArrive=true`の敵は目的地到着時に`etype.DeployType`を`DeployCount`体生成する(`deployFromCar`)。生成は`spawnEnemy`を通り、**親の`squadId`をそのまま引き継ぐ**(引き継がないと編成の全滅判定`CountAlive(squadId)`が壊れる)。到着できないまま`DeployFallbackTime`秒経つと強制的に降ろす保険がある(「Step3の設計判断」§9-8参照。**実装済み・未検証**)。
   - **湧き位置の分散(`DeploySquad`。Step3手順6)**: 同一`DeploySquad`呼び出し内で`usedPoints`(閉じたローカル集合)を持ち、`Movement=="road"`の個体だけがそこに書き込んで交差点の重複を避ける。それ以外の個体(警官)は`usedPoints`を避けつつ`Spawn.Jitter`の範囲でランダムにずれる(警官同士の重複は許容。理由は「Step3の設計判断」§9-5参照)。除外の結果候補が尽きた場合は`MinDistanceFromPlayer`は諦めず、重複除外だけを諦めて`warn`を出す。
   - **被弾フラッシュ(Step3手順7)**: `etype.Hits > 1`の敵(現状パトカーのみ)にだけ`Highlight`インスタンスを生成時に1個作っておき(`enemy.hitFlash`)、ダメージが入り生き残ったときだけ`Enabled`を0.12秒だけ`true`にする。撃破された場合や`HitCooldown`で無効化された被弾では発火しない。**リモートは使わない**(サーバー内で完結)。
-- **ThreatManager.lua**: 段階(★)の政策。`Config.Threat.CheckInterval`ごとにスコアを監視し、`Config.Threat.Stages`を昇順に走査して閾値を跨いだら`EnemyManager.DeploySquad`で編成を派遣する(段階固定の`if`分岐は持たない)。編成の全滅(`EnemyManager.CountAlive(squadId)==0`)を検出すると`RespawnDelay`秒後に次の編成を派遣する(`waitingRespawn`フラグで二重派遣を防止)。ラウンド境界は`Start()`/`Stop()`/`Clear()`の3メソッドで`NPCManager`と同じ作法。
+- **ThreatManager.lua**: 段階(★)の政策。`Config.Threat.CheckInterval`ごとにスコアを監視し、`Config.Threat.Stages`を昇順に走査して閾値を跨いだら`EnemyManager.DeploySquad`で編成を派遣する(段階固定の`if`分岐は持たない)。派遣後の追加編成の出し方は`Stages[n]`が`ReinforcementInterval`を持つかどうかで排他的に分岐する(§17参照): 持たない段階(★1)は従来どおり編成の全滅(`EnemyManager.CountAlive(squadId)==0`)を検出すると`RespawnDelay`秒後に**新しい`squadId`**で次の編成を派遣する(`waitingRespawn`フラグで二重派遣を防止)。持つ段階(★2)は生存数を一切見ず、`nextReinforcementAt`が示す一定間隔ごとに**同じ`squadId`**へ同じ`Squad`定義を無制限に追加派遣する(定期増援方式)。ラウンド境界は`Start()`/`Stop()`/`Clear()`の3メソッドで`NPCManager`と同じ作法。
 - **RoundClock.lua**: バトル残り時間の唯一の持ち主。`Start(base)`/`Remaining()`/`Add(delta, reason, player)`/`Stop()`を持つ。内部はdeadline方式(`endsAt = os.clock() + 残り秒数`)で、`task.wait`のドリフトを吸収する。`Add`は`running=false`(LOBBY/RESULT中)なら何もせず0を返す。上限(`Config.Round.BattleTimeMax`)・下限フロア(`Config.Round.BattleTimeFloor`)のクランプに加え、**損失キャップ**(直近60秒の累計損失が`deps.maxLossPerMinute`を超えないようにクリップ。`Config.Threat.Damage.MaxLossPerMinute`を`GameManager`経由で受け取る。0で無効)を行い、実際に反映された秒数を返す。キャップで完全にブロックされた瞬間(残り予算0)だけサーバーログに出す。
 - **NPCManager.lua**: Humanoidを使わない軽量NPC。徘徊(共有Heartbeat)・即死ラグドール・パニック逃走・フェード消滅・頭数維持を担当。`OnExplosion(ctx)`で爆風を受ける(内部ロジックは`ctx`化の影響を受けていない)。
 - **WeaponServer.lua**: バズーカ(直進弾+レイキャスト)・エアストライク(矩形マーカー予告+編隊による絨毯爆撃)・リモート爆弾(クリック位置設置+起爆)の3武器を実装。エアストライクは`PlaneCount`機がプレイヤー→クリック地点の向きに引いた爆撃線の上を通過しながら`BombsPerPlane`発ずつ投下する(`buildSchedule`/`planeLateral`/`buildPlane`)。**戦闘機の速度・投下地点・飛行時間はすべて投下スケジュールから導出**しており、独立した入力値を持たない(§12-4)。各爆発は`maxReal = MaxRealPerBomb`で`Explode`を呼び、`scoreScale`は渡さない(連鎖ボーナスはリモート爆弾専用)。リモート爆弾は設置時に`MaxPlaceDistance`の**水平距離**判定を行い、超過時は爆弾を作らず・設置数もクールダウンも消費せず`Hud "notice"`を本人にだけ送る(`placeBomb`。判定はサーバー側のみで、クライアントは変更していない)。起爆時は同時起爆数から`chainMultiplier()`で倍率を求め、各`Explode(ctx)`に`scoreScale`として渡したうえで`Hud "chain"`を送る(×1のときは送らない)。ツール配布、`leaderstats`スコア管理、クールダウン管理もここ。`GetTotalScore()`は`ThreatManager`の段階判定用(`Config.Threat.ScoreSource`で合計/最高を切替)。`GetRanking()`の各エントリには`userId`(`player.UserId`)も含む(`name`/`score`は従来どおり。`GameManager`が`EnemyManager.GetKillCounts()`とこの`userId`で突き合わせて撃破数をマージする。`DisplayName`は一意でないため使わない)。
@@ -253,10 +253,10 @@ StarterPlayer/StarterPlayerScripts
 | DebugLog | true | 段階到達時刻・湧き・撃破をサーバーログに出す |
 | CorpseDespawnTime | 6 | 撃破した敵の死体が消えるまでの秒数 |
 | Retreat.Enabled | true | falseで昇格時の旧部隊撤退を行わない(切り分け用。Step5-0) |
-| Retreat.Speed | 45 | 撤退時の直進速度(stud/s)。通常敵より明確に速い(Step5-2。§15参照) |
-| Retreat.ExitMargin | 25 | cityBoundsからこの距離だけ余分に出てからDestroyする(Step5-2) |
-| Retreat.MaxDuration | 8 | この秒数を超えても抜けきらない場合はFallbackFadeTimeへ切替(残留防止。Step5-2) |
-| Retreat.FallbackFadeTime | 0.4 | 降下中兵士の撤退・MaxDuration超過時だけ使う安全弁のフェード秒数(Step5-2。旧FadeTime) |
+| Retreat.Speed | 45 | 撤退時の直進速度(stud/s)。通常敵より明確に速い(Step5-1b。§15参照) |
+| Retreat.ExitMargin | 25 | cityBoundsからこの距離だけ余分に出てからDestroyする(Step5-1b) |
+| Retreat.MaxDuration | 8 | この秒数を超えても抜けきらない場合はFallbackFadeTimeへ切替(残留防止。Step5-1b) |
+| Retreat.FallbackFadeTime | 0.4 | 降下中兵士の撤退・MaxDuration超過時だけ使う安全弁のフェード秒数(Step5-1b。旧FadeTime) |
 | Damage.Invincible | 0 | 被弾後の無敵秒数(プレイヤーごと)。**2026-07-31 実機フィードバックで2.0→0に変更**。体力表示が無いゲームで無敵中の被弾を無視すると「当たっているのに減らないバグ」に見えるため。理論ドレインは警官4人で-1.8秒/秒、★3の兵士8人では-10秒/秒になる。★3(Step6)で無敵時間の復活か`MaxLossPerMinute`のどちらかの再検討が必要 |
 | Damage.DefaultTelegraph | 0 | 敵種別に`Telegraph`が無い場合の既定値(秒)。判定タイミングそのもの |
 | Damage.BeamDuration | 0.2 | 赤い予告ビームが画面に残る秒数。判定とは無関係の見た目のみ |
@@ -272,8 +272,8 @@ StarterPlayer/StarterPlayerScripts
 | Indicator.Enabled / MaxDistance / PoolSize / UpdateInterval / Margin | true / 400 / 8 / 0.1 / 40 | 画面端の方向インジケータ(クライアント側) |
 | EnemyTypes.PoliceOfficer / PoliceCar / Soldier | (§末尾参照) | Step3・Step5-1完了により3種とも実装済み。Tank(Step6)は未実装 |
 | HelicopterTransport.* | (§末尾参照) | Step5-1で新設。軍用ヘリの飛行・降下パラメータ。ヘリ自体はEnemyTypesに**登録しない**(戦闘する敵ではなく輸送演出専用) |
-| Stages[1] | ★1警察・Threshold=1000・Squad={PoliceCar×2, PoliceOfficer×2}・RespawnDelay=20 | 残りの警官はパトカーが道中で降車させる(§末尾参照) |
-| Stages[2] | ★2軍隊・Threshold=4000(暫定値)・Squad={Soldier×4, transport="helicopter"}・RespawnDelay=20 | Step5-1で新設。★3は未実装の敵種別(Tank)を参照するため未登録(登録するとエラーになる) |
+| Stages[1] | ★1警察・Threshold=1000・Squad={PoliceCar×2, PoliceOfficer×2}・RespawnDelay=20 | 残りの警官はパトカーが道中で降車させる(§末尾参照)。全滅後RespawnDelay秒で新squadIdの再派遣(§17参照) |
+| Stages[2] | ★2軍隊・Threshold=4000(暫定値)・Squad={Soldier×4, transport="helicopter", arrivalSpawns={Sniper×2}}・ReinforcementInterval=20 | Step5-1/5-2で新設。生存数に関係なく20秒ごとに同じsquadIdへSquad一式を無制限追加(§17参照)。★3は未実装の敵種別(Tank)を参照するため未登録(登録するとエラーになる) |
 
 **Config.Threat.EnemyTypes.PoliceOfficer の内訳**
 
@@ -788,9 +788,9 @@ Step4dでバズーカが0.3秒間隔の連射になっても1発ごとに必ず�
 
 危険度昇格時に前段階の敵部隊をゲーム上即座に無効化する「撤退」処理を導入した
 (`ThreatManager.promote()` / `EnemyManager.RetreatSquad()`)。撤退の見た目(その場でフェード消滅
-させるか、街外へ退場させるか)はStep5-2で変更している(§15参照)。本節はStep5-0時点の設計判断
+させるか、街外へ退場させるか)はStep5-1bで変更している(§15参照)。本節はStep5-0時点の設計判断
 (即無効化・スコア等の対象外化・撤退済み部隊の再スポーン防止)を記録したもので、これらの判断自体は
-Step5-2でも維持している。敵種別・編成そのものは変更していない(★3はまだ`Config.Threat.Stages`に
+Step5-1bでも維持している。敵種別・編成そのものは変更していない(★3はまだ`Config.Threat.Stages`に
 登録されない)。
 
 ### 13-1. `ThreatManager`は昇格時に旧`currentSquadId`を撤退させる
@@ -811,7 +811,7 @@ Step5-2でも維持している。敵種別・編成そのものは変更して�
    被弾フラッシュを無効化 → 全`BasePart`の`CanQuery`/`CanCollide`を`false`に → `enemies`テーブルから
    除去
 
-ここまでは即座に行う。ここから先の見た目の消し方はStep5-2で分岐した(§15参照): 地上の敵は
+ここまでは即座に行う。ここから先の見た目の消し方はStep5-1bで分岐した(§15参照): 地上の敵は
 `retreatingEnemies`へ登録して街外周へ移動させ、降下中の兵士(`enemy.deploying == true`)だけ
 その場でフェードアウトさせる。
 
@@ -828,10 +828,10 @@ Step5-2でも維持している。敵種別・編成そのものは変更して�
 撤退前に既に降ろされていた警官は親パトカーと同じ`squadId`を持つため、同じ`RetreatSquad()`呼び出しで
 まとめて撤退する。
 
-### 13-4. 撤退した敵が消えるまで(Step5-2で変更。詳細は§15)
+### 13-4. 撤退した敵が消えるまで(Step5-1bで変更。詳細は§15)
 
 Step5-0時点では全敵が`Config.Threat.Retreat.FadeTime`秒でその場フェード消滅していたが、
-Step5-2で地上の敵は街外周への移動に変更した。撤退開始と同時に`CanQuery = false`になる点は
+Step5-1bで地上の敵は街外周への移動に変更した。撤退開始と同時に`CanQuery = false`になる点は
 変わらないため、撤退中の敵にバズーカを撃つと弾はすり抜ける(意図した挙動)。
 
 ### 13-5. 撤退済み部隊からの遅延スポーンを防止する
@@ -931,6 +931,11 @@ Step5-2で地上の敵は街外周への移動に変更した。撤退開始と�
 `spawnEnemy()`が失敗を返した場合(理論上は`systemDisabled`時のみ発生しうる)も、その個体ぶんの
 pendingは必ず消費してwarnを出す。消費しないと残留したpendingにより`CountAlive`が永久に0にならず、
 以後の全滅判定・再派遣が起きなくなる事故につながるため。
+
+※このpending加算・減算の仕組み自体は`EnemyManager`側の実装として現在も無変更で残っているが、
+★2は後日(§17参照)定期増援方式へ移行したため`ThreatManager`が`CountAlive`を再派遣条件として
+参照しなくなった。`CountAlive`自体は`SETUP.md`のExplorer確認や将来の他段階のために引き続き
+正しい値を返す。
 
 ### 14-3. ヘリ輸送のキャンセル経路
 
@@ -1040,7 +1045,12 @@ Step5-1実装後の実機プレイテストで、モバイルの「発射」ボ�
 
 あわせて、装備中の武器スロットが「黄色3pxの枠」だけではスマホ実機で目立たなかったため、装備中の見た目を「ほぼ黒(`Color3.fromRGB(8,8,10)`・`Transparency=0.05`)背景 + 黄色5px枠」に強調した。未装備スロットの見た目(`Color3.fromRGB(30,30,35)`・`Transparency=0.3`・黄色枠OFF)は変更していない。両状態の色・透明度・枠太さは`UIController.client.lua`内のローカル定数(`SLOT_NORMAL_*`/`SLOT_SELECTED_*`)に集約し、スロット生成時と`WeaponSelected`受信時の両方が同じ定数を参照する(初期生成時と装備解除時で通常色がズレる事故を防ぐため)。クールダウン中の暗転`overlay`は無変更で、装備中の黄色太枠と共存する(`overlay`が枠を完全に隠す構造にはなっていないため、ZIndexは変更していない)。
 
-## 15. Step 5-2 の設計判断(旧部隊の撤退演出改善)
+## 15. Step 5-1b の設計判断(旧部隊の撤退演出改善)
+
+※命名注記: この節は当初「Step 5-2」と呼んでいたが、`THREAT_DESIGN_PROPOSAL.md`側で
+「Step 5-2」はスナイパー追加を指す名称として既に使われていたため、命名の衝突を避けて
+`Step 5-1b`(Step5-1で追加した撤退演出の改良)へ改称した(2026-08-07)。実装内容・判断は無変更。
+「Step 5-2」は§16(スナイパー)が正式に使う。
 
 Step5-0の撤退演出(その場でフェード消滅)を、「ゲーム上は即無効化 → 最寄りの街外周へ高速移動 →
 街の外へ出たらDestroy」に変更した。§13で確定した即無効化(`enemy.alive = false`・`Retreating`/
@@ -1090,7 +1100,7 @@ Step5-0の撤退演出(その場でフェード消滅)を、「ゲーム上は�
 撤退中の個体は§13-2の時点で既に`enemies`テーブルから除去されている。`CountAlive`・
 `OnExplosion`(爆風判定)はどちらも`enemies`テーブルのみを走査するため、`retreatingEnemies`に
 登録されているかどうかに関わらず、これらの対象には最初から入らない。攻撃(`fireAttack`/
-`fireBurst`)も同様に`enemies`から外れることで自然に停止する。この性質のためStep5-2では
+`fireBurst`)も同様に`enemies`から外れることで自然に停止する。この性質のためStep5-1bでは
 `CountAlive`・`OnExplosion`・攻撃系のいずれにも変更を加えていない。
 
 ### 15-6. `EnemyManager.Clear()`
@@ -1104,3 +1114,188 @@ Step5-0の撤退演出(その場でフェード消滅)を、「ゲーム上は�
 
 `FadeTime`(全個体共通の即時フェード秒数)は`Speed`/`ExitMargin`/`MaxDuration`/`FallbackFadeTime`に
 置き換えて削除した。削除前に`EnemyManager.lua`以外からの参照が無いことを確認済み。
+
+---
+
+## 16. Step 5-2 の設計判断(★2 スナイパー追加)
+
+★2部隊(Soldier×4・ヘリ輸送)へスナイパー2人を追加した。スナイパー専用の2機目ヘリは出さず、
+既存ヘリが投下地点へ到着した瞬間に屋上へ同時出現させ、Movement="stationary"(完全静止)・
+AttackType="sniper"(固定射線・遮蔽物無視)という新しい移動/攻撃方式を導入した。
+Soldier4人の輸送・降下・機関銃・警官/兵士の既存遮蔽判定はいずれも無変更。
+
+### 16-1. `Config.Threat.EnemyTypes.Sniper`
+
+既存の`human`ボディ(`buildHumanBody`)をそのまま流用。`SpawnY`はあえて設定しない
+(`spawnEnemy()`は`etype.SpawnY`が無ければ呼び出し位置のYをそのまま使うため、屋上ごとに
+異なる高さや地上フォールバックのYをデータ側で作らずに済む)。`StandingRootOffset`(3)は
+屋根上面からTorso中心までの高さで、既存人型の`SpawnY=3`(地面からTorso中心)と同じ体格の値。
+
+### 16-2. `arrivalSpawns`: 同じヘリの到着イベントから追加配置する
+
+`Config.Threat.Stages[2].Squad[1]`(Soldier×4・`transport="helicopter"`)へ、
+`arrivalSpawns = { { type="Sniper", count=2, placement="rooftop" } }`を追加した。
+`entry.transport`は従来どおり`"helicopter"`のまま(スナイパー用の独立entryにしない)。
+`EnemyManager.deployByHelicopter()`は、ヘリが投下地点へ`heliFlyTo()`で到着した直後・
+Soldierの降下ループより前に`spawnArrivalUnits()`を呼び、`arrivalSpawns`内の全typeを
+同一フレーム内で生成する(yieldを挟まない)。Soldierのような`deploying`降下演出は使わず、
+屋上/地上へ直接出現させる(「動いて避ける敵」ではなく「予告を見て動いて避ける敵」という
+設計のため、降下中の無防備演出は不要と判断した)。
+
+また、この変更に合わせて`deployByHelicopter()`内の`spawnEnemy("Soldier", ...)`という
+ハードコードを`spawnEnemy(entry.type, ...)`へ一般化した。現状の★2では`entry.type=="Soldier"`
+なので既存挙動(★2のSoldier4人降下)は変わらない。
+
+### 16-3. `pendingDeployments`はSoldier+Sniperの合算
+
+`deployByHelicopter()`はyieldする前(`heliFlyTo`を呼ぶ前)に、`entry.count`(Soldier4)と
+`arrivalSpawns`内の全`count`(Sniper2)を合算した値(=6)を`pendingDeployments[squadId]`へ
+一括加算する。これにより「ヘリ飛行中は生存0体」という`CountAlive`の誤判定窓は生じない
+(既存のSoldier単体運用と同じ保証がそのまま拡張される)。
+
+デクリメントは`decrementPending(squadId)`という共通関数に切り出し、Sniper(`spawnArrivalUnits`
+内)・Soldier(既存降下ループ)の両方から呼ぶ。`spawnEnemy`が`nil`を返した場合(`systemDisabled`等)
+でも、その個体ぶんのpendingは必ず消費してwarnを出す(旧Soldier単体の保証をSnipeにも拡張した)。
+
+### 16-4. 屋上候補の探し方(`findRooftopCandidates`)
+
+`CityGenerator`には一切手を入れない。ヘリが投下地点へ到着した時点で`workspace.Map`を
+`GetDescendants()`し、`BuildingId`属性を持つ`BasePart`だけを対象に、`BuildingId`ごとの
+最高部(`topY = Position.Y + Size.Y/2`、X/Zはそのパーツの中心)を1つ選ぶ。これにより
+「現在残っているブロックの中でその棟の一番高い場所」が屋上候補になり、部分破壊で屋根の
+一部が失われていても、残存パーツの中から自動的に妥当な高さが選ばれる。
+候補はdropPointとの水平距離が近い順にソートして返す。`best`テーブルが`BuildingId`ごとに
+1件しか保持しないため、2人のスナイパーに`candidates[1]`/`candidates[2]`を割り当てるだけで
+自動的に異なる棟が選ばれる(§4-4で追加の「何stud以内」調整値を増やさずに済むという要件を、
+BuildingIdでのグループ化だけで満たしている)。
+
+### 16-5. 屋上不足時のフォールバック
+
+候補が足りない(0〜1棟)ぶんだけ、既存の`jitterPoint(dropPoint, LandingSpread)`で
+ヘリの投下地点付近の地上へ散らす。`Sniper.SpawnY`が無いため、`jitterPoint`が返す
+`dropPoint.Y`(=3。`computeSpawnPoints`の仮値と同じ)がそのまま人型の接地高さとして使われる。
+地上へ出た場合も`Movement="stationary"`なのでスナイパーは移動しない。
+
+屋根が爆風で失われた後にスナイパーが空中に浮いたまま残るケースは今回のスコープ外
+(§4-12・やらないこと参照)。頻発するようなら「足元支持なし→通常`killEnemy`でラグドール化」を
+後続の小改修として検討する。
+
+### 16-6. `Movement="stationary"`と`updateStationaryEnemy()`
+
+`updateEnemy()`の分岐順を`deploying → road → stationary → direct`にした。
+`updateStationaryEnemy()`は`updateDirectEnemy()`から移動処理(接近・向き変更・`PivotTo`)を
+すべて除いたもので、`THINK_INTERVAL`ごとの`pickTarget()`と、`AttackRange`内かつ`nextAttack`
+到来時の攻撃開始だけを行う。`nextAttack`は既存と同じく攻撃"開始"時点で`AttackInterval`を積む
+(Telegraph=2秒・AttackInterval=3秒なら、0秒:予告開始→2秒:発砲→3秒:次の予告開始→5秒:次弾、
+という約3秒間隔になる)。
+
+### 16-7. `AttackType="sniper"`と固定射線・遮蔽物無視の実装
+
+`fireSniper(enemy, targetPlayer, targetRoot)`は、予告"開始"時点で
+`origin = enemy.markerAnchor.Position`・`direction = (targetRoot.Position - origin).Unit`・
+`rayEnd = origin + direction * AttackRange`を確定し、以後`Telegraph`秒間これらを一切
+再計算しない(発砲時にプレイヤーの現在位置へ照準を取り直すことをしない、という§2の急所を
+クロージャで捕捉した`origin`/`direction`によって構造的に保証している)。赤い予告線は
+既存の`enemyAim`(`EffectsClient.client.lua`は無変更)をそのまま使い、`to`にプレイヤー位置ではなく
+`rayEnd`(500stud先の固定点)を渡すことで、プレイヤーの現在地で線が途切れずAttackRangeいっぱいまで
+伸びる。`duration`には見た目専用の`BeamDuration`ではなく`etype.Telegraph`を渡し、予告表示が
+判定タイミングと同じ長さだけ残るようにした。
+
+判定本体`resolveSniperShot()`は、`raycastMap()`(警官・兵士が使う既存Map遮蔽判定)を一切呼ばない。
+代わりに`RaycastParams.FilterType = Include`・`FilterDescendantsInstances = { 対象Character }`の
+`Raycast`を、予告時に固定した`origin`/`direction`でMapを対象にせず直接飛ばす。これにより建物・
+瓦礫・他の敵・NPCはRaycastの対象にすら含まれないため自動的に貫通し、対象Characterの
+`BasePart`に実際に交差した場合のみ命中する(独自の「命中幅」を持たず、Robloxの細いRaycastが
+そのまま当たり判定になる)。命中時は既存`damagePlayer()`(-2秒・Hud赤フラッシュ・
+`enemyShotHit`)、外れ時は既存`enemyShotMiss`をそのまま使う。
+
+判定前に、`roundToken`一致・`enemy.alive`・`aggressive`・`Retreating`属性・対象Playerの
+`Parent`・対象`Character`の5点を確認し、いずれか1つでも欠けていれば判定自体を行わず終了する
+(ミスのエフェクトも出さない)。これにより、撤退中に予約された2秒前の弾が後から命中したり、
+ラウンド境界をまたいで判定が走ったりすることはない(§13-3の`resolveAttack`と同じ設計方針を
+sniper専用の判定にも踏襲した)。
+
+### 16-8. 攻撃分岐はAttackTypeのみ
+
+`updateStationaryEnemy()`内の分岐は`etype.AttackType`の値(`"sniper"`/`"burst"`/その他)だけを
+見て`fireSniper`/`fireBurst`/`fireAttack`を選ぶ。敵タイプ名(`"Sniper"`)によるベタ書き分岐は
+どこにも存在しない。`updateDirectEnemy()`側の分岐(`burst`/その他)は、`sniper`が
+`Movement="stationary"`専用のため変更していない。
+
+### 16-9. 撃破・スコア・タイム
+
+`Hits=1`のため既存`OnExplosion()` → `killEnemy()`をそのまま使う。撃破時のスコア(+500)・
+撃破数・ラグドール・`CorpseDespawnTime`後の消滅はいずれも既存の共通経路で、敵種別ごとの
+分岐は追加していない。撃破後のラグドールは物理化されるため、屋上にいたスナイパーの死体は
+自然に落下する(これは意図した挙動であり、§4-12の「生存中の浮遊」とは別の話)。
+
+---
+
+## 17. ★2定期増援(全滅非依存の増援)の設計判断
+
+★2の再派遣条件を「部隊全滅後」から「生存数に関係ない20秒ごとの定期増援」に変更した。
+★1は従来どおり「全滅後`RespawnDelay`秒で新`squadId`の再派遣」のまま。`EnemyManager.lua`は無変更
+(既存の`DeploySquad`/`deployByHelicopter`/`pendingDeployments`をそのまま再利用する)。
+
+### 17-1. `Config.Threat.Stages[n].ReinforcementInterval`で方式を切り替える
+
+`Stages[2]`から`RespawnDelay`を削除し、`ReinforcementInterval = 20`を追加した。`ThreatManager`は
+`stages[stage].ReinforcementInterval`の有無だけで「定期増援方式」か「全滅再派遣方式」かを判定する。
+段階番号(`if stage == 2 then`)による分岐は持たない。★1は`ReinforcementInterval`を持たないため、
+従来の`RespawnDelay`ベースの全滅再派遣がそのまま動く。
+
+### 17-2. `nextReinforcementAt`と`promote()`
+
+モジュールローカルに`nextReinforcementAt`(定期増援の次回派遣時刻)を新設した。`promote(n)`は
+`DeploySquad(currentSquadId, def.Squad)`(初回派遣)を呼んだ**直後**に、新段階の`def`を見て
+`ReinforcementInterval`があれば`os.clock() + ReinforcementInterval`を、無ければ`nil`を設定する。
+段階が変わるたびに必ずこの代入が実行されるため、★2→★3のような昇格が起きた瞬間に★2用の
+`nextReinforcementAt`は自動的に無効化される(専用の「停止」処理を別途書く必要が無い)。
+
+### 17-3. `monitorLoop`の排他分岐
+
+既存の閾値判定(`promote`呼び出し)の直後に、`stages[stage].ReinforcementInterval`の有無で分岐する:
+
+- **ある場合(★2)**: `currentSquadId`が存在し`os.clock() >= nextReinforcementAt`なら、
+  `CountAlive`を一切見ずに`DeploySquad(currentSquadId, def.Squad)`を呼び、直後に
+  `nextReinforcementAt`を`ReinforcementInterval`後へ再設定する。`squadSeq`は増やさず
+  `currentSquadId`も変更しない(新しいヘリ・Soldier・Sniperは全員同じ`squadId`に属する)。
+  `waitingRespawn`にも触れない
+- **無い場合(★1)**: 既存の`CountAlive(currentSquadId) == 0` → `waitingRespawn` →
+  `RespawnDelay`後に`squadSeq`をインクリメントして新`squadId`で再派遣、という処理を無変更で維持
+
+この2経路は`if / elseif`で排他になっており、同じ段階で両方が同時に働くことはない。
+
+### 17-4. 20秒は「前回派遣開始から次回派遣開始まで」
+
+`nextReinforcementAt`は`promote()`(初回)と`monitorLoop`内の派遣直後(2回目以降)の**両方**で
+「派遣した時点」の`os.clock()`を基準に加算する。ヘリの飛行時間・兵士降下・敵の生死は
+この時刻計算に一切影響しない。`CheckInterval`(1秒)の監視ループで処理が遅延しても、
+「まとめて追いつく」ことはない(`os.clock() >= nextReinforcementAt`を満たした回だけ1回派遣し、
+その時点から次の`ReinforcementInterval`を数え直すため、未消化回数が蓄積しない)。
+
+### 17-5. `squadId`を増援ごとに変えない
+
+★2にいる間、初回派遣も以後の全増援も同じ`currentSquadId`に属する。これにより、後日★3が実装され
+昇格した際、既存の`RetreatSquad(previousSquadId)`を1回呼ぶだけで、★2期間中に蓄積した
+全Soldier・Sniper・飛行中の全ヘリ(`activeTransports`はモデル単位で追跡しているため、
+同じ`squadId`のヘリが複数機同時に飛行中でも個別にキャンセルできる)がまとめて撤退・
+中断の対象になる。増援ごとに新しい`squadId`を発行する設計にすると、最後の1波しか
+撤退できず古い部隊が残留するため、これは必須の設計判断である。
+
+### 17-6. `EnemyManager`側で追加対応が不要な理由
+
+`deployByHelicopter()`は呼び出しのたびに`pendingDeployments[squadId]`へ**加算**する実装に
+なっている(Step5-2時点で既にSoldier+Sniperの合算加算として実装済み)。同じ`squadId`へ
+`DeploySquad`が複数回呼ばれても、この加算方式のおかげで複数回ぶんのpendingがそのまま
+積み上がるだけで壊れない。Sniperの屋上配置(`findRooftopCandidates`)は派遣のたびに
+`workspace.Map`を再走査するため、常にその時点で残っている屋上候補から選ばれる。
+波をまたいだ屋上の重複防止(同じ屋根に複数のSniperが乗る可能性の排除)は追加していない
+(許容する、という指示に従った)。
+
+### 17-7. 人数・波数の上限を設けない
+
+Soldier/Sniperの最大生存数、最大増援回数、最大ヘリ機数、敵総数によるキャップは意図的に
+追加していない。20秒ごとに敵を処理しなければ数が増え続けることを、プレイヤーが選択できる
+プレイスタイル(積極的に処理するか、時間を稼いで後回しにするか)として仕様化している。
+パフォーマンス上の懸念が実機で顕在化した場合は、この節を更新したうえで別途上限を検討する。

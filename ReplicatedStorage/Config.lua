@@ -472,6 +472,33 @@ Config.Threat = {
 			Parts = 6, -- パーツ予算の見積り用(コードは参照しない)
 			SpawnY = 3, -- PoliceOfficerと同じ人型なので同じ接地Y座標を採用
 		},
+		Sniper = {
+			DisplayName = "スナイパー",
+			Body = "human", -- 既存の軽量人型6パーツをそのまま流用する
+
+			BodyColors = {
+				Shirt = Color3.fromRGB(45, 48, 52), -- Soldier(オリーブ系)と区別できる暗いグレー系
+				Pants = Color3.fromRGB(30, 32, 35),
+			},
+
+			Hits = 1, -- HPを上げてクリック疲れで難易度を作らない既存方針を維持
+			HitCooldown = 0.25,
+
+			Movement = "stationary", -- 屋上・地上のどちらでも位置を一切移動しない
+			AttackType = "sniper", -- 敵タイプ名ではなく攻撃方式で分岐する
+			AttackRange = 500, -- 4×4の街全体をほぼ狙える長距離敵として暫定採用
+			AttackInterval = 3.0, -- 発砲"開始"から次の発砲"開始"まで。既存nextAttackと同じ意味を維持
+			Telegraph = 2.0, -- モバイルでも赤線を見て移動して避けられる時間を確保する
+			TimePenalty = 2, -- 1発の脅威を兵士より大きくする代わり、固定射線で回避可能にする
+
+			ScoreReward = 500, -- 長射程の優先撃破対象として兵士より高くする
+			TimeReward = 0, -- 「敵は時間を配らない」の決着済み方針を維持
+
+			StandingRootOffset = 3, -- 屋根上面からTorso中心までの高さ。既存人型SpawnY=3と同じ体格
+			Parts = 6, -- パーツ予算の見積り用(コードは参照しない)
+			-- SpawnYは設定しない。spawnEnemy()はetype.SpawnYが無ければ呼び出し位置のYを使うため、
+			-- 屋上ごとに異なる高さ(roofTopY+StandingRootOffset)や地上フォールバックのYをそのまま使える
+		},
 	},
 
 	-- ▼ 段階(配列。順序が段階の順序。★4は末尾に1エントリ足すだけで動く設計)
@@ -496,9 +523,21 @@ Config.Threat = {
 			Threshold = 4000,
 			Telop = "軍が出動した!",
 			Sound = "Siren",
-			RespawnDelay = 20,
+			-- 全滅を待たない定期増援(旧RespawnDelayから移行)。生存数に関係なく、この秒数ごとに
+			-- 同じsquadIdへSquad一式(ヘリ1機・Soldier4・Sniper2)を無制限に追加する。
+			-- ReinforcementIntervalが無い段階(★1)は従来どおり全滅後RespawnDelayで再派遣される
+			ReinforcementInterval = 20,
 			Squad = {
-				{ type = "Soldier", count = 4, transport = "helicopter" },
+				{
+					type = "Soldier",
+					count = 4,
+					transport = "helicopter",
+					-- ヘリが投下地点へ到着した瞬間、同一フレームでSniper2人を追加配置する(Step5-2)。
+					-- スナイパー専用の2機目ヘリは出さない。詳細はEnemyManager.deployByHelicopter参照
+					arrivalSpawns = {
+						{ type = "Sniper", count = 2, placement = "rooftop" },
+					},
+				},
 			},
 		},
 	},

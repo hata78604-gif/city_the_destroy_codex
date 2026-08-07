@@ -544,6 +544,65 @@ local function fireBurst(enemy, targetPlayer)
 	end)
 end
 
+--------------------------------------------------------------------
+-- スナイパーの固定射線攻撃(Step5-2)。AttackType=="sniper"の敵専用。既存fireAttack/resolveAttack
+-- (警官のshoot)・fireBurst/resolveBurstShot(兵士)には一切触れない。
+-- Mapへのraycast(遮蔽物判定)は行わない仕様(§3の急所): 建物・瓦礫・他の敵・NPCを貫通する
+--------------------------------------------------------------------
+
+-- Telegraph秒後の判定本体。予告開始時に固定したorigin/directionをそのまま使い、
+-- 発砲時点のプレイヤー位置へ照準を取り直すことはしない
+local function resolveSniperShot(enemy, targetPlayer, origin, direction, token)
+	if roundToken ~= token then
+		return -- ラウンドが終わっていたら何もしない
+	end
+	if not enemy.alive or not aggressive then
+		return
+	end
+	if enemy.model:GetAttribute("Retreating") then
+		return -- 撤退中に予約された弾は後から命中させない
+	end
+	if not targetPlayer.Parent then
+		return -- 対象プレイヤーが退出済み
+	end
+	local char = targetPlayer.Character
+	if not char then
+		return
+	end
+
+	local etype = enemy.etype
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = { char } -- 対象Characterだけを判定対象にする(Mapは含めない)
+	local result = workspace:Raycast(origin, direction * etype.AttackRange, params)
+
+	if result then
+		damagePlayer(targetPlayer, etype.TimePenalty, result.Position)
+	else
+		deps.effectRemote:FireAllClients("enemyShotMiss", { position = origin + direction * etype.AttackRange })
+	end
+end
+
+-- 予告開始。origin/direction/rayEndをここで確定し、以後2秒間(Telegraph)変更しない。
+-- 赤い予告線は既存enemyAimをそのまま使う(duration=Telegraphなので予告終了と同時に消える)
+local function fireSniper(enemy, targetPlayer, targetRoot)
+	local etype = enemy.etype
+	local token = roundToken
+	local origin = enemy.markerAnchor.Position
+	local direction = (targetRoot.Position - origin).Unit
+	local rayEnd = origin + direction * etype.AttackRange
+
+	deps.effectRemote:FireAllClients("enemyAim", {
+		from = origin,
+		to = rayEnd, -- プレイヤー位置ではなく500stud先の固定点で線を終わらせる
+		duration = etype.Telegraph,
+	})
+
+	task.delay(etype.Telegraph, function()
+		resolveSniperShot(enemy, targetPlayer, origin, direction, token)
+	end)
+end
+
 -- Movement=="direct"(直進)の敵の移動・攻撃。既存ロジックは無変更(リネームのみ)
 local function updateDirectEnemy(enemy, dt)
 	local now = os.clock()
@@ -580,6 +639,38 @@ local function updateDirectEnemy(enemy, dt)
 		-- バースト終了後にさらに3秒待つ実装にはしない(5連射 約0.48秒 + 休止 約2.5秒になる)
 		enemy.nextAttack = now + etype.AttackInterval
 		if etype.AttackType == "burst" then
+			fireBurst(enemy, target)
+		else
+			fireAttack(enemy, target, root)
+		end
+	end
+end
+
+-- Movement=="stationary"(静止。Step5-2)の敵の攻撃のみ。屋上・地上どちらでも位置を一切変えない
+local function updateStationaryEnemy(enemy, _dt)
+	local now = os.clock()
+	if now >= enemy.nextThink then
+		enemy.nextThink = now + THINK_INTERVAL
+		enemy.target = pickTarget(enemy)
+	end
+
+	local target = enemy.target
+	local root = target and target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+	if not (target and root) then
+		return -- 標的が居ない: 待機(エラーを出さない)
+	end
+
+	local etype = enemy.etype
+	local flatOffset = Vector3.new(
+		root.Position.X - enemy.core.Position.X, 0, root.Position.Z - enemy.core.Position.Z)
+	local d = flatOffset.Magnitude
+
+	if now >= enemy.nextAttack and d <= etype.AttackRange then
+		-- nextAttackは攻撃"開始"時点でここに積む(updateDirectEnemyと同じ意味)
+		enemy.nextAttack = now + etype.AttackInterval
+		if etype.AttackType == "sniper" then
+			fireSniper(enemy, target, root)
+		elseif etype.AttackType == "burst" then
 			fireBurst(enemy, target)
 		else
 			fireAttack(enemy, target, root)
@@ -911,6 +1002,8 @@ local function updateEnemy(enemy, dt)
 		updateDeployingEnemy(enemy, dt)
 	elseif enemy.etype.Movement == "road" then
 		updateRoadEnemy(enemy, dt)
+	elseif enemy.etype.Movement == "stationary" then
+		updateStationaryEnemy(enemy, dt)
 	else
 		updateDirectEnemy(enemy, dt)
 	end
@@ -1224,6 +1317,86 @@ local function jitterPoint(center, spread)
 	return Vector3.new(center.X + math.cos(ang) * r, center.Y, center.Z + math.sin(ang) * r)
 end
 
+-- squadIdのpendingDeploymentsを1減らす(生成成功・失敗を問わず、個体1体ぶんを必ず消費する)。
+-- ヘリ降下のSoldierとarrivalSpawnsのSniperの両方で使う共通処理(Step5-2)
+local function decrementPending(squadId)
+	if pendingDeployments[squadId] then
+		pendingDeployments[squadId] -= 1
+		if pendingDeployments[squadId] <= 0 then
+			pendingDeployments[squadId] = nil
+		end
+	end
+end
+
+-- 現在workspace.Mapに残っているBuildingId付きBasePartから、棟(BuildingId)ごとの屋上候補を集める
+-- (Step5-2)。CityGeneratorには手を入れず、破壊で減った後の残存パーツだけを見る。
+-- 候補は各棟の最高部(topY = Position.Y + Size.Y/2)1つに絞り、dropPointに近い順に並べて返す。
+-- 戻り値の各要素: { x, z, topY, dist }
+local function findRooftopCandidates(dropPoint)
+	local map = workspace:FindFirstChild("Map")
+	if not map then
+		return {}
+	end
+	local best = {} -- best[buildingId] = { x, z, topY }
+	for _, part in map:GetDescendants() do
+		if part:IsA("BasePart") then
+			local buildingId = part:GetAttribute("BuildingId")
+			if buildingId then
+				local topY = part.Position.Y + part.Size.Y / 2
+				local current = best[buildingId]
+				if not current or topY > current.topY then
+					best[buildingId] = { x = part.Position.X, z = part.Position.Z, topY = topY }
+				end
+			end
+		end
+	end
+
+	local list = {}
+	local flatDrop = Vector3.new(dropPoint.X, 0, dropPoint.Z)
+	for _, candidate in best do
+		candidate.dist = (Vector3.new(candidate.x, 0, candidate.z) - flatDrop).Magnitude
+		table.insert(list, candidate)
+	end
+	table.sort(list, function(a, b)
+		return a.dist < b.dist
+	end)
+	return list
+end
+
+-- ヘリ到着イベントからの同時配置(Step5-2)。entry.arrivalSpawnsの各typeをcount体ぶん、
+-- 同一フレーム内で生成する(降下演出は使わない。屋上へ直接出現させる)。
+-- placement=="rooftop"は異なるBuildingIdの屋上候補を1棟ずつ割り当て、候補不足ぶんは
+-- dropPoint付近の地上(既存のLandingSpread)へフォールバックする
+local function spawnArrivalUnits(squadId, arrivalSpawns, dropPoint)
+	local cfg = Config.Threat.HelicopterTransport
+	for _, spawnEntry in arrivalSpawns do
+		if spawnEntry.placement ~= "rooftop" then
+			warn(("[EnemyManager] 未知のplacement '%s' (タイプ '%s') のarrivalSpawnsを無視します")
+				:format(tostring(spawnEntry.placement), spawnEntry.type))
+		else
+			local etype = Config.Threat.EnemyTypes[spawnEntry.type]
+			local rootOffset = (etype and etype.StandingRootOffset) or 0
+			local candidates = findRooftopCandidates(dropPoint)
+			for i = 1, spawnEntry.count do
+				local candidate = candidates[i]
+				local pos
+				if candidate then
+					pos = Vector3.new(candidate.x, candidate.topY + rootOffset, candidate.z)
+				else
+					pos = jitterPoint(dropPoint, cfg.LandingSpread) -- 屋上不足時は地上フォールバック
+				end
+				local enemy = spawnEnemy(spawnEntry.type, pos, squadId)
+				if not enemy then
+					-- systemDisabled等で失敗しても、この個体ぶんのpendingは必ず消費する(§4の急所)
+					warn(("[EnemyManager] 到着時配置で%sの生成に失敗しました (squad=%d)")
+						:format(spawnEntry.type, squadId))
+				end
+				decrementPending(squadId)
+			end
+		end
+	end
+end
+
 -- ヘリ輸送1回ぶんの処理本体。DeploySquadから直接呼ばれる(このsquadListにはヘリ以外の
 -- 同時エントリが無い前提だが、将来混在しても後続entryをブロックしない設計にはしていない。
 -- 現状の★2編成が単一entryのため許容する)
@@ -1233,8 +1406,15 @@ local function deployByHelicopter(squadId, entry, token)
 	end
 	local cfg = Config.Threat.HelicopterTransport
 
-	-- yieldする前に同期的にpendingを加算する(§10)。CountAlive誤判定の窓を作らないための要
-	pendingDeployments[squadId] = (pendingDeployments[squadId] or 0) + entry.count
+	-- yieldする前に同期的にpendingを加算する(§10)。CountAlive誤判定の窓を作らないための要。
+	-- arrivalSpawns(Step5-2のSniper等)ぶんも同じヘリのpendingへ含める
+	local totalPending = entry.count
+	if entry.arrivalSpawns then
+		for _, spawnEntry in entry.arrivalSpawns do
+			totalPending += spawnEntry.count
+		end
+	end
+	pendingDeployments[squadId] = (pendingDeployments[squadId] or 0) + totalPending
 
 	local dropPoint = pickSpawnPoint(nil) -- 既存のMinDistanceFromPlayerルールをそのまま使う(§9-1)
 	local axisIsX = rng:NextNumber() < 0.5
@@ -1267,6 +1447,12 @@ local function deployByHelicopter(squadId, entry, token)
 		return
 	end
 
+	-- 到着イベント: arrivalSpawns(Step5-2のSniper等)を同一フレームで生成する。
+	-- 既存のSoldier降下ループより先に行う(§2の急所: 同じヘリの到着イベントから生成する)
+	if entry.arrivalSpawns then
+		spawnArrivalUnits(squadId, entry.arrivalSpawns, dropPoint)
+	end
+
 	-- 兵士を1人ずつ降下させる(DropInterval間隔)
 	for i = 1, entry.count do
 		if transport.cancelled or roundToken ~= token or retiredSquads[squadId] then
@@ -1274,7 +1460,7 @@ local function deployByHelicopter(squadId, entry, token)
 			return
 		end
 		local landPos = jitterPoint(dropPoint, cfg.LandingSpread)
-		local enemy = spawnEnemy("Soldier", landPos, squadId, {
+		local enemy = spawnEnemy(entry.type, landPos, squadId, {
 			deploying = true,
 			deployFromY = cfg.Altitude - cfg.DropOffsetY,
 			suppressSpawnEffect = true,
@@ -1282,14 +1468,9 @@ local function deployByHelicopter(squadId, entry, token)
 		if not enemy then
 			-- systemDisabled等でspawnEnemyが失敗した場合でも、この個体ぶんのpendingは
 			-- 必ず消費する(残留するとCountAliveが永久に0にならず再派遣が起きなくなる)
-			warn(("[EnemyManager] ヘリ降下でSoldierの生成に失敗しました (squad=%d)"):format(squadId))
+			warn(("[EnemyManager] ヘリ降下で%sの生成に失敗しました (squad=%d)"):format(entry.type, squadId))
 		end
-		if pendingDeployments[squadId] then
-			pendingDeployments[squadId] -= 1
-			if pendingDeployments[squadId] <= 0 then
-				pendingDeployments[squadId] = nil
-			end
-		end
+		decrementPending(squadId)
 		if i < entry.count then
 			task.wait(cfg.DropInterval)
 		end

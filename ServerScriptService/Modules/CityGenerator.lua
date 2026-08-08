@@ -355,6 +355,10 @@ local function buildBuilding(slot, template, storeys, palette, buildingId, paren
 			Vector3.new(0, rows * BH + BH / 2, 0), sx, sz)
 	end
 
+	-- 残骸の接地Y(Step V-3)。DestructionManagerが破壊ブロックを潰して並べる高さの基準に使う。
+	-- 現状は街全体で共通のGROUND定数と同値だが、将来の地形起伏に備えて建物ごとに持たせている
+	model:SetAttribute("BaseY", GROUND)
+
 	model.Parent = parent
 	return model.Name
 end

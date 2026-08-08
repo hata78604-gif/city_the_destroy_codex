@@ -226,6 +226,17 @@ StarterPlayer/StarterPlayerScripts
 | DummySize | Vector3(1.4,1.4,1.4) | |
 | CollideTime | 1.5 | 本物の瓦礫が発生してから`CanCollide=false`になるまでの秒数(Step V-2で新設) |
 
+### Config.Rubble(Step V-3で新設)
+| キー | 値 | 備考 |
+|---|---|---|
+| Enabled | true | falseで従来どおり全て消える(切り分け用) |
+| Chance | 0.3 | 破壊された建物ブロックが残骸になる確率(対象は`BuildingId`付きのみ。石垣・街小物は対象外) |
+| Height | 0.5 | 潰した後の高さ(stud)。`math.min(元のSize.Y, Height)`なので元より大きくはならない |
+| SpreadScale | 1.15 | 潰れて広がったX/Zの倍率 |
+| Color | (35,30,27) | 焦げた黒褐色 |
+| Material | Slate | |
+| MaxTotal | 3000 | 街全体の残骸数の上限。超えたら最も古い残骸から削除(瓦礫の`evictOldest`と同じFIFO方式) |
+
 ### Config.NPC
 | キー | 値 |
 |---|---|
@@ -443,6 +454,8 @@ GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 24+108 = 132  -- St
 4. `buildGridProps(map, footprints)`: `CityGenerator.GetRoadLines()`の道路網を基準に街灯・駐車車両・木・ベンチを配置(`Config.City.Slots`は使わない)。`CityProp`タグに加え、Step V-2で`Destructible`タグも付与(`BuildingId`は付けない。破壊可能だが全壊判定・破壊率・スナイパー屋上候補には混ざらない)
 5. 手作りテンプレート(`chooseBuildingSource`)は引き続き**呼ばれない**(7節参照。従来モード専用)
 
+**`BaseY`属性(Step V-3で新設)**: `buildBuilding`(プロシージャル生成。両モード共通)は、生成した建物の`Model`に`model:SetAttribute("BaseY", GROUND)`を付与する。`DestructionManager`が残骸(§20)を接地させる高さの基準として読む。現状`GROUND`は街全体で共通の1つの定数(起伏の無い地形)だが、将来の地形起伏や建物ごとの個別接地に備えて建物単位の属性にしてある。**手作りテンプレート(`placeTemplateBuilding`)には付与していない**(§7節参照。従来モードのみで使われるため今回は対象外)。`DestructionManager`側は`BaseY`が読めない建物のブロックを残骸化せず、従来どおり`Destroy`するフォールバックを持つため、手作り建物が混ざってもエラーにはならない(§20-3参照)。
+
 ### 従来モード(`USE_GRID_MODE=false`。凍結中・コードは温存)
 
 `Config.City.Slots`(13棟)に沿って`buildRoads`(十字路1本)・`buildStoneWalls`(石垣)・`buildProps`(街灯12本/車6台/木9本/ベンチ2脚)・手作りテンプレート混在(`chooseBuildingSource`/`TemplateValidator`)まで一式実行する。コードは変更していないため、`USE_GRID_MODE`を`false`に戻せばそのまま動作する。
@@ -457,15 +470,18 @@ GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 24+108 = 132  -- St
 1. `Effect`リモートで`"explosion"`を全クライアントに送信(見た目の演出はEffectsClient側。この送信自体はダメージと無関係)
 2. `workspace.Map`から`GetPartBoundsInRadius`(`OverlapParams`, `Include Map`, `MaxParts=2000`)で半径内のパーツを取得し、`"Destructible"`タグを持つものだけ`hits`に集める
 3. `hits`を爆心からの距離で昇順ソート
-4. **C案ハイブリッドの本体**: `realCap = clamp(min(ctx.maxReal or MaxRealPerExplosion, MAX_UNANCHORED - debrisCount), 0, #hits)`
+4. **残骸抽選(`tryRubbleify`。Step V-3)**: real/excessの振り分けより先に、各`hit`ごとに「残骸になるか」を判定する。`BuildingId`が無い(石垣・街小物)、または親Modelに`BaseY`属性が無い(現状は手作りテンプレート建物のみ該当。§3参照)場合は対象外。対象かつ`Config.Rubble.Chance`の抽選に当たったパーツは、物理化を一切せず(飛ばさない)その場で潰れた残骸に作り変えて`registerDestruction`を呼び、real/excessどちらの枠も消費せず処理を終える(詳細は§20)
+5. **C案ハイブリッドの本体**: 残骸にならなかったパーツ(`realAssigned`でカウント)について、`realCap = clamp(min(ctx.maxReal or MaxRealPerExplosion, MAX_UNANCHORED - debrisCount), 0, #hits)`
    - `MaxRealPerExplosion`(30) = 1爆発あたりの本物瓦礫の上限。`ctx.maxReal`で武器ごとに上書き可(現状どの呼び出し元も指定しないため既定値のまま)
    - `MAX_UNANCHORED - debrisCount` = 瓦礫総数(全体で1000)の残り枠。枠が無ければ`realCap=0`になり自動的にダミーのみのフォールバックになる
-5. 距離昇順で`i<=realCap`は`destroyBlockReal`(Anchored=false・CollisionGroup="Debris"・`SetNetworkOwner(nil)`・`applyBlastImpulse`で外向き+上向きの力・`enqueueDebris(DEBRIS_LIFETIME=8s)`)。それ以外(`excess`)は`destroyBlockExcess`(物理化せず`registerDestruction`のみ行って即`Destroy`)
-6. `excessCount>0`なら`spawnDummyDebris(map, position, radius, min(DummyCount=10, excessCount))`——爆心付近にランダム散布した軽量パーツ(`CanCollide=false`)を固定数だけ生成し、本物と同じ`applyBlastImpulse`(速度スケール0.6)をかけて`enqueueDebris(DUMMY_LIFETIME=2s)`
-7. `registerDestruction(part, ctx)`: `ctx.attacker`がいればスコア加算(`Config.Score.Block * (ctx.scoreScale or 1)`)。建物の`destroyed`は`ctx.attacker`の有無に関わらず必ずインクリメント(敵が壊した分も破壊率に含めるため)。`destroyed/total >= math.ceil(total * BonusThreshold(0.9))`かつ未受領なら、`ctx.bonusPolicy`(既定`"normal"`)が`"normal"`かつ`ctx.attacker`がいる場合のみ`BuildingBonus`加算 + `deps.addTime`があれば`RoundClock.Add(Config.Score.BuildingBonusTime, "building", ctx.attacker)`も同じ分岐内で呼ぶ(スコアとタイムを別分岐にしない。将来`bonusPolicy="deny"`を追加した際にズレが出ないようにするため)。`"collapse"`エフェクトは条件に関わらず発火(全壊は1棟につき1回)
-8. 最後に`deps.blastListeners`配列の各関数へ`ctx`をそのまま渡して爆風を委譲(現状は`NPCManager.OnExplosion`のみ登録)
+6. 距離昇順で`realAssigned<realCap`は`destroyBlockReal`(Anchored=false・CollisionGroup="Debris"・`SetNetworkOwner(nil)`・`applyBlastImpulse`で外向き+上向きの力・`enqueueDebris(DEBRIS_LIFETIME=8s)`)。それ以外(`excess`)は`destroyBlockExcess`(物理化せず`registerDestruction`のみ行って即`Destroy`)
+7. `excessCount>0`なら`spawnDummyDebris(map, position, radius, min(DummyCount=10, excessCount))`——爆心付近にランダム散布した軽量パーツ(`CanCollide=false`)を固定数だけ生成し、本物と同じ`applyBlastImpulse`(速度スケール0.6)をかけて`enqueueDebris(DUMMY_LIFETIME=2s)`
+8. `registerDestruction(part, ctx)`: `ctx.attacker`がいればスコア加算(`Config.Score.Block * (ctx.scoreScale or 1)`)。建物の`destroyed`は`ctx.attacker`の有無に関わらず必ずインクリメント(敵が壊した分も破壊率に含めるため)。`destroyed/total >= math.ceil(total * BonusThreshold(0.9))`かつ未受領なら、`ctx.bonusPolicy`(既定`"normal"`)が`"normal"`かつ`ctx.attacker`がいる場合のみ`BuildingBonus`加算 + `deps.addTime`があれば`RoundClock.Add(Config.Score.BuildingBonusTime, "building", ctx.attacker)`も同じ分岐内で呼ぶ(スコアとタイムを別分岐にしない。将来`bonusPolicy="deny"`を追加した際にズレが出ないようにするため)。`"collapse"`エフェクトは条件に関わらず発火(全壊は1棟につき1回)。**残骸(`tryRubbleify`)もこの`registerDestruction`を呼ぶため、全壊判定・破壊率のカウントは残骸化の有無に一切影響されない**(§20-1参照)
+9. 最後に`deps.blastListeners`配列の各関数へ`ctx`をそのまま渡して爆風を委譲(現状は`NPCManager.OnExplosion`のみ登録)
 
 **瓦礫キュー**: 全瓦礫(本物+ダミー)は共通のFIFOキュー(`head`/`tail`インデックス)で`debrisCount`を管理。`debrisCount > MAX_UNANCHORED`(1000)になった瞬間、寿命に関係なく最古の瓦礫を`evictOldest`で即削除する。寿命が来た瓦礫は`TweenService`で`FadeTime`(1秒)かけて透明化してから削除(`fadeAndRemove`)。
+
+**残骸キュー(Step V-3)**: 瓦礫キューとは別の独立したFIFOキュー(`rubbleHead`/`rubbleTail`/`rubbleCount`)を持つ。フェード消滅はせず(恒久設置物のため)、`rubbleCount > Config.Rubble.MaxTotal`(3000)になった瞬間、最古の残骸を即`Destroy`する(`evictOldestRubble`)。ラウンド終了時は`DestructionManager.ClearAllRubble()`を`ClearAllDebris()`と並べて呼ぶ(`GameManager`のLOBBY開始処理)。`Map:Destroy()`自体でパーツは消えるが、この内部キューの状態は別途リセットしないと次ラウンドの`MaxTotal`判定がずれるため必須。
 
 **一括処理**: 1回の爆発でヒットした全パーツを1ループでまとめて処理する(順次崩落ではない)。
 
@@ -508,6 +524,11 @@ GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 24+108 = 132  -- St
 石垣(`buildGridStoneWalls`)・街灯/車/木/ベンチ(`buildGridProps`)はStep V-1で有効化済み(§3参照)。
 
 これらを組み込む場合は`CityGenerator.Generate()`のグリッド分岐(`if USE_GRID_MODE then ... end`)内に追加実装が必要。
+
+**申し送り(Step V-3)**: 手作りテンプレートのグリッドモード有効化(上記D-1)を実装する際は、
+`placeTemplateBuilding`が生成する`clone`(手作り建物のModel)にも`model:SetAttribute("BaseY", GROUND)`
+を1行追加すること。無いと、その建物のブロックは残骸化されず(§20参照)従来どおり`Destroy`
+されるだけになる(エラーにはならないが、その建物だけ焼け跡が残らない)。
 
 ## 8. 未実装のまま保留(敵システム側)
 
@@ -1406,3 +1427,73 @@ Step V-1の実装は棟の向きを`sizeX`/`sizeZ`の長辺基準(`sz > sx`)で�
 その配下の全`BasePart`へ一括で`Destructible`タグを付ける方式にしている。
 `buildStreetlight`/`buildCar`/`buildTree`/`buildBench`は従来モードの`buildProps`とも
 共有しているヘルパーのため、ヘルパー自体は無改修のまま(タグ分岐を入れていない)。
+
+---
+
+## 20. Step V-3 の設計判断(焼け焦げた残骸・C-3フェーズ)
+
+破壊されたブロックが`Destroy`で消えて更地になる問題への対処。破壊されたブロックの一部を
+`Destroy`せず、その場で潰れた黒い残骸に作り変えて地面に残す(`Config.Rubble`。§2参照)。
+今回実装したのはC-3(残骸)のみ。C-5(炎・煙の時間変化)は別ステップで扱う。
+
+### 20-1. 残骸から`BuildingId`を外す理由(全壊ボーナス・破壊率を壊さないためではない)
+
+着手前の調査で、全壊判定(`building.destroyed`)と建物破壊率(`GetBuildingStats`)は**カウンタ方式**
+であることを確認した。`registerDestruction`が各パーツにつき**破壊フローに入った瞬間に1回だけ**
+呼ばれ、その場でカウンタを確定させる(§4手順8)。そのパーツが後で`Destroy`されようが残骸に
+作り変えられようが、カウンタは一切影響を受けない。**したがって残骸に`BuildingId`を残しても、
+全壊ボーナスや破壊率が壊れることはない。**
+
+`BuildingId`を外す本当の理由は`EnemyManager.findRooftopCandidates`(★2スナイパーの屋上出現
+位置探索)である。これは`workspace.Map`を毎回スキャンして`BuildingId`付き`BasePart`の中から
+棟ごとの最高点を拾う実装のため、残骸(地面すれすれの黒い塊)が`BuildingId`を持ったままだと、
+全壊した棟の"最高点"として拾われてしまい、スナイパーが地面の残骸の上に出現しうる。
+`BuildingId`を外せば、残骸はどの判定にも参加しない「ただの黒い塊」になる。
+
+### 20-2. 残骸はパーツを作り変えて実現する(新規生成しない)
+
+破壊対象のブロックのうち残骸になるものは、既存の`BasePart`インスタンスの
+`Size`/`CFrame`/`Color`/`Material`/`Anchored`/`CanCollide`を書き換えるだけで作る。
+Roblox で最も重いのは大量のInstanceの生成・削除であり、既存パーツを作り変えるだけなら
+パーツ総数が増えず、生成・削除のコストも発生しない。
+
+**吹き飛ばし(物理化)も行わない。** 破壊された瞬間に一度も`Unanchored`にせず、その場で
+接地・整形する。「一度吹き飛んでから残骸に定着する」演出も検討したが、着地位置を残骸の
+接地Yに正しく合わせる処理が複雑になる割に効果が薄いため、実装をシンプルに保つことを優先した。
+
+### 20-3. 接地Y(`BaseY`)をRaycastで求めない理由
+
+残骸は「地面に落ちて積もったもの」として表現するため、潰した後のYを建物の接地面に
+合わせる必要がある。これをRaycastで都度求める設計は採らなかった: 1回の爆発で最大数百
+ブロックが同時に破壊されうるゲームで、その都度Raycastすると爆発のたびにコストが跳ねる。
+
+代わりに、建物生成時(`CityGenerator.buildBuilding`)に建物の`Model`へ`BaseY`属性を
+1回だけ設定しておき、`DestructionManager`はそれを読むだけにした(§3参照)。
+`BaseY`が読めない建物(現状は手作りテンプレートのみ。§7の申し送り参照)のブロックは
+残骸化せず、従来どおり`Destroy`するフォールバックに倒す。
+
+### 20-4. 残骸の抽選はreal/excessの振り分けより先に行う
+
+`Explode`は距離昇順で近い`realCap`個を物理化(`destroyBlockReal`)、残りを即`Destroy`
+(`destroyBlockExcess`)する既存の振り分けを持つ(§4)。残骸抽選をこの振り分けの**後**に
+行うと、「物理化された瓦礫が後から残骸になる」実装になり、飛行中の瓦礫をどのタイミングで
+残骸に切り替えるかという複雑さが生じる。残骸抽選を振り分けの**前**に置き、残骸に選ばれた
+パーツはreal/excessどちらの枠も消費せずに処理を終える設計にすることで、既存のreal/excess
+振り分けロジック(`realCap`・`MAX_UNANCHORED`)を一切変更せずに済んだ(消費するのは
+「残骸にならなかった数」という新しいローカル変数`realAssigned`のみ)。
+
+### 20-5. 残骸キューを瓦礫キューと共有しなかった理由
+
+瓦礫(`queue`/`head`/`tail`/`debrisCount`)は「物理シミュレーション中でタイマーにより
+フェード消滅する」ライフサイクルを持つ。残骸は「恒久設置物で`MaxTotal`超過時のみ削除される」
+ライフサイクルを持ち、性質が異なる。同じhead/tail方式のFIFOではあるが、別の変数群
+(`rubbleQueue`/`rubbleHead`/`rubbleTail`/`rubbleCount`)として実装した(§4参照)。
+
+### 20-6. 手作り建物への配慮(D-1で作り直しが発生しない設計)
+
+残骸化の処理(`tryRubbleify`)は`BasePart`共通のプロパティのみを操作し、`ClassName`
+(`Part`/`WedgePart`/`MeshPart`等)では分岐しない。潰す高さも`math.min(元のSize.Y, Height)`
+とし、元より薄いパーツを厚くしない。`BaseY`が読めない建物は残骸化せず安全に`Destroy`へ
+フォールバックする(§20-3)。これにより、D-1(手作りテンプレートのグリッドモード有効化)を
+実装する際は`placeTemplateBuilding`に`BaseY`属性を1行追加するだけで済む設計にしてある
+(§7の申し送り参照)。

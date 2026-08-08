@@ -175,6 +175,7 @@ while true do
 	ThreatManager.Clear() -- ★Step2で追加(段階を0に戻す)
 	EnemyManager.Clear() -- ★Step2で追加(NPCManager.Clear()の隣。敵モデル・攻撃タイマー全消去)
 	DestructionManager.ClearAllDebris()
+	DestructionManager.ClearAllRubble()
 	CityGenerator.Clear()
 
 	local buildings = CityGenerator.Generate()

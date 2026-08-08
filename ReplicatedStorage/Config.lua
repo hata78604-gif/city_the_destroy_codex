@@ -306,6 +306,19 @@ Config.Debris = {
 	CollideTime = 1.5,
 }
 
+-- ▼ 焼け焦げた残骸(Step V-3 C-3)。破壊された建物ブロックの一部を Destroy せず、
+-- その場で潰れた黒い塊に作り変えて地面に残す(既存パーツの書き換え。新規生成はしない)。
+-- 石垣・街小物(BuildingId無し)は対象外。詳細は CURRENT_SPEC.md 参照
+Config.Rubble = {
+	Enabled = true, -- falseで従来どおり全て消える(切り分け用)
+	Chance = 0.3, -- 破壊された建物ブロックが残骸になる確率(残りは従来どおりDestroy)
+	Height = 0.5, -- 潰した後の高さ(stud)。元のサイズより大きくはしない
+	SpreadScale = 1.15, -- 潰れて広がったX/Zの倍率
+	Color = Color3.fromRGB(35, 30, 27), -- 焦げた黒褐色
+	Material = Enum.Material.Slate,
+	MaxTotal = 3000, -- 街全体の残骸数の上限。超えたら最も古い残骸から削除
+}
+
 -- ▼ NPC --------------------------------------------------------------
 Config.NPC = {
 	Count = 10, -- マップ上に常時維持する数

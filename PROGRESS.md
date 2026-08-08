@@ -1109,3 +1109,96 @@ Step5-0の撤退演出(危険度昇格時、旧部隊がその場でフェード
 - 実機で振ってほしい値: `Config.Debris.CollideTime`(小さくすると早く通れるが瓦礫がぶつかる
   迫力が減る)・`Roof.GableHeight`・`Config.Performance.DebrisLifetime`(8に戻したことで
   瓦礫が残る時間が長くなったため、体感で重ければ調整)
+
+---
+
+# 街並みリアル化 Step V-3・フェーズA の実装(焼け焦げた残骸。2026-08-08)
+
+指示書に基づき実装。着手前に「全壊判定・破壊率がカウンタ方式かスキャン方式か」
+「接地Yの持たせ方」の2点を調査・報告し、承認を得てから着手した(指示書§2の手順どおり)。
+C-5(火・煙。フェーズB)は今回のスコープ外。
+
+## 着手前調査で判明した訂正点
+
+指示書は「残骸に`BuildingId`を残すと全壊ボーナス・破壊率が壊れる」という前提だったが、
+コードを読んだ結果これは不正確だった。全壊判定(`building.destroyed`)・破壊率は**カウンタ方式**
+で、`registerDestruction`が各パーツの破壊フロー突入時に1回だけ呼ばれてその場で確定する
+(後でそのパーツが`Destroy`されようが残骸に作り変えられようが影響しない)。`BuildingId`を
+外す本当の理由は`EnemyManager.findRooftopCandidates`(★2スナイパーの屋上探索)だけだった。
+対処自体(属性を外す)は指示書どおり実施。詳細は`CURRENT_SPEC.md` §20-1。
+
+もう1点、接地Y(`BaseY`)について: 調査の結果、現状の`CityGenerator.GROUND`は街全体で
+共通の1つの定数(起伏の無い地形)であることが判明。「共通定数を参照する」案と「指示書どおり
+建物ごとに`BaseY`属性を持たせる」案をユーザーに確認し、**将来の地形起伏・D-1を見越して
+指示書どおり属性方式を採用**することで確定した。
+
+## 実装したもの
+
+- `ReplicatedStorage/Config.lua` — `Config.Rubble`を新設
+  (`Enabled`/`Chance=0.3`/`Height=0.5`/`SpreadScale=1.15`/`Color`/`Material=Slate`/`MaxTotal=3000`)
+- `ServerScriptService/Modules/CityGenerator.lua` — `buildBuilding`(プロシージャル生成。
+  両モード共通)が生成した建物の`Model`に`model:SetAttribute("BaseY", GROUND)`を付与。
+  手作りテンプレート(`placeTemplateBuilding`)には**付与していない**(指示書§4-2で明示的に
+  スコープ外。§7に申し送りを記載済み)
+- `ServerScriptService/Modules/DestructionManager.lua`
+  - `tryRubbleify(part, ctx)`を新設。`BuildingId`を持ち親Modelに`BaseY`があるパーツのみ対象、
+    `Config.Rubble.Chance`で抽選。当たったパーツは一度も物理化せず(吹き飛ばさない)その場で
+    `Size`/`CFrame`/`Color`/`Material`/`Anchored`/`CanCollide`を書き換えて残骸にする
+    (新規Instance生成なし)。`BuildingId`除去・`Destructible`タグ除去・`registerDestruction`呼び出しも行う
+  - `Explode()`のreal/excess振り分けループの先頭で`tryRubbleify`を呼び、残骸になったパーツは
+    どちらの枠も消費しない設計にした(`realCap`との比較を`i`ではなく新変数`realAssigned`で行うよう変更)
+  - 瓦礫キューとは別の`rubbleQueue`/`rubbleHead`/`rubbleTail`/`rubbleCount`(FIFO)を新設。
+    `Config.Rubble.MaxTotal`超過時は`evictOldestRubble`で最古の残骸を即`Destroy`
+  - `DestructionManager.ClearAllRubble()`を新設(ラウンド終了時の内部状態リセット用)
+- `ServerScriptService/GameManager.server.lua` — LOBBY開始処理の`ClearAllDebris()`の隣に
+  `ClearAllRubble()`を追加
+- `CURRENT_SPEC.md` — `Config.Rubble`をConfig一覧に追加、§4(破壊処理の流れ)に残骸抽選の
+  ステップを追記、§3に`BaseY`属性の説明を追加、§7に「D-1実装時は`placeTemplateBuilding`にも
+  `BaseY`を1行追加すること」という申し送りを追加、新設§20(Step V-3の設計判断。全6項目)を追加
+- `SETUP.md` — 「焼け焦げた残骸の確認ポイント」チェックリスト、`Config.Rubble`の調整表、
+  30fps調整順に`Config.Rubble.MaxTotal`を追加
+
+## 暫定措置・妥協点
+
+- **物理化(吹き飛ばし)を一切行わない設計**にした。「一度吹き飛んでから残骸に定着する」演出も
+  検討したが、着地位置を残骸の接地Yに正しく合わせる処理が複雑になる割に効果が薄いため、
+  ユーザーとの相談のうえ見送った(§着手前調査参照)
+- **手作りテンプレート建物のブロックは残骸化されない**(`BaseY`が無いため`tryRubbleify`が
+  必ず`false`を返し従来どおり`Destroy`されるだけ)。指示書のスコープどおりの意図的な仕様
+
+## Studioでの検証結果(このセッションで実施)
+
+接続中のRoblox Studio(MCP)で以下を直接確認した:
+
+- **`BaseY`属性**: グリッド街生成直後、任意の建物Modelの`BaseY`属性が`GROUND`(0.5)と一致することを確認
+- **残骸の変形**: 建物ブロックへ`Explode`を複数回発火させ、生成された残骸パーツの
+  `Size`(例: `9.2, 0.5, 2.3`。元の`8x?x2`ブロックに`SpreadScale=1.15`と`Height=0.5`が
+  正しく適用された値)・`Position.Y`(`baseY + newHeight/2`と一致)・`BuildingId`(nil)・
+  `Destructible`タグ(無し)・`Anchored`(true)を実測して仕様どおりであることを確認
+- **全壊ボーナスとの整合**: 実在の建物(小屋)を大半破壊するまで`Explode`を繰り返し、
+  `building.bonusGiven`が`true`になり出力に`[DestructionManager] 小屋(17号棟) 全壊!`が
+  出ることを確認(残骸が混ざっていても全壊判定を阻害しないことの実地確認)
+- 上記はいずれも`DestructionManager.Init`にスタブ依存を注入した検証用スクリプトから
+  `Explode`を直接発火させる方法で行った(実際のプレイヤー入力を経由していない)ため、
+  スコア加算・武器のクールダウン等は未検証。`Config.Rubble.MaxTotal`超過時の退避動作
+  (`evictOldestRubble`)は既存の瓦礫`evictOldest`と同一のFIFOロジックを流用しているのみで、
+  実機での直接観測はできていない
+
+## 次ステップへの申し送り
+
+- **フェーズB(C-5。火→煙→焦げ跡の時間変化)は未着手**。指示書§5に従い、フェーズAの
+  ユーザー確認が完了してから着手する
+- **`Config.Rubble.MaxTotal`超過時の退避・ラウンド境界での`ClearAllRubble`は、実際の
+  プレイヤー操作を経由した実機テストが未実施**(上記「Studioでの検証結果」参照)。長時間の
+  プレイや連続ラウンドで残骸が正しく上限内に収まり続けるかは実機確認が必要
+- D-1(手作りテンプレートのグリッドモード有効化)着手時は`CURRENT_SPEC.md` §7の申し送りどおり
+  `placeTemplateBuilding`に`BaseY`属性の付与を忘れないこと
+
+## ユーザー手作業
+
+- `SETUP.md` **「焼け焦げた残骸の確認ポイント(Step V-3・C-3フェーズ)」**をStudioで実際に
+  プレイして確認する。特に「全壊ボーナスが正しく1回入る」「破壊率が100%に到達できる」
+  「スナイパーが残骸の上ではなく建物の屋上に出現する」は実際のプレイ操作でしか確認できない
+- タブレット実機での30fps・メモリ確認(残骸はパーツの書き換えのみで新規生成しないため、
+  瓦礫ほど重くならない想定だが未検証)
+- 確認が完了したらフェーズB(火・煙)着手の可否を判断する

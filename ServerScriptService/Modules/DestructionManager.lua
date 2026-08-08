@@ -34,6 +34,16 @@ local DUMMY_LIFETIME = debrisCfg.DummyLifetime or 2 -- ダミー破片の寿命(
 local DUMMY_SIZE = debrisCfg.DummySize or Vector3.new(1.4, 1.4, 1.4)
 local COLLIDE_TIME = debrisCfg.CollideTime or 1.5 -- 本物の瓦礫が当たり判定を失うまでの秒数(Step V-2)
 
+-- 焼け焦げた残骸の設定(Config.Rubble側。無ければ既定値で続行。Step V-3)
+local rubbleCfg = Config.Rubble or {}
+local RUBBLE_ENABLED = if rubbleCfg.Enabled ~= nil then rubbleCfg.Enabled else true
+local RUBBLE_CHANCE = rubbleCfg.Chance or 0.3
+local RUBBLE_HEIGHT = rubbleCfg.Height or 0.5
+local RUBBLE_SPREAD = rubbleCfg.SpreadScale or 1.15
+local RUBBLE_COLOR = rubbleCfg.Color or Color3.fromRGB(35, 30, 27)
+local RUBBLE_MATERIAL = rubbleCfg.Material or Enum.Material.Slate
+local RUBBLE_MAX_TOTAL = rubbleCfg.MaxTotal or 3000
+
 local DestructionManager = {}
 local rng = Random.new()
 
@@ -48,6 +58,12 @@ local buildings = {}
 local queue = {}
 local head, tail = 1, 0
 local debrisCount = 0
+
+-- 残骸キュー(古い順・別管理。Step V-3)。瓦礫と違いフェード消滅せず、
+-- MaxTotal超過時のみ最古のものから即時削除する(瓦礫のevictOldestと同じ考え方)
+local rubbleQueue = {}
+local rubbleHead, rubbleTail = 1, 0
+local rubbleCount = 0
 
 --------------------------------------------------------------------
 -- 初期化
@@ -162,6 +178,43 @@ local function enqueueDebris(part, lifetime)
 	task.delay(lifetime, fadeAndRemove, entry)
 end
 
+--------------------------------------------------------------------
+-- 残骸管理(Step V-3)。瓦礫と違いフェード消滅せず、MaxTotal超過時のみ
+-- 最も古いものから即時削除する(瓦礫のevictOldestと同じ考え方)
+--------------------------------------------------------------------
+local function removeRubble(entry)
+	if entry.removed then
+		return
+	end
+	entry.removed = true
+	rubbleCount -= 1
+	if entry.part.Parent then
+		entry.part:Destroy()
+	end
+end
+
+local function evictOldestRubble()
+	while rubbleHead <= rubbleTail do
+		local entry = rubbleQueue[rubbleHead]
+		rubbleQueue[rubbleHead] = nil
+		rubbleHead += 1
+		if entry and not entry.removed then
+			removeRubble(entry)
+			return
+		end
+	end
+end
+
+local function enqueueRubble(part)
+	rubbleCount += 1
+	local entry = { part = part, removed = false }
+	rubbleTail += 1
+	rubbleQueue[rubbleTail] = entry
+	if rubbleCount > RUBBLE_MAX_TOTAL then
+		evictOldestRubble()
+	end
+end
+
 -- 爆発中心から外向きの力を計算して加える(本物・ダミー共通)
 local function applyBlastImpulse(part, center, radius, speedScale)
 	local offset = part.Position - center
@@ -215,6 +268,64 @@ local function destroyBlockExcess(part, ctx)
 	CollectionService:RemoveTag(part, "Destructible")
 	registerDestruction(part, ctx)
 	part:Destroy()
+end
+
+--------------------------------------------------------------------
+-- 焼け焦げた残骸(Step V-3): 破壊されたブロックの一部を Destroy せず、
+-- その場で潰れた黒い塊に作り変えて残す。新規パーツは生成しない(既存パーツの書き換え)。
+--
+-- 対象は建物ブロック(BuildingId付き)のみ。石垣・街小物は対象外。
+-- 建物の親Modelから BaseY(接地Y)が取れない場合は残骸化せず false を返し、
+-- 呼び出し側が従来どおり destroyBlockReal/destroyBlockExcess へフォールバックする。
+--
+-- 吹き飛ばし演出は行わない(一度も物理化しない)。既存の位置(X/Z)にそのまま留まり、
+-- 潰れて広がった見た目と接地だけを表現する。
+--
+-- 戻り値: true=残骸化した(呼び出し側は他の処理を行わない) / false=対象外・抽選外れ
+--------------------------------------------------------------------
+local function tryRubbleify(part, ctx)
+	if not RUBBLE_ENABLED then
+		return false
+	end
+
+	local buildingId = part:GetAttribute("BuildingId")
+	if not buildingId then
+		return false -- 石垣・街小物など建物ブロック以外は対象外
+	end
+
+	local parentModel = part.Parent
+	local baseY = parentModel and parentModel:GetAttribute("BaseY")
+	if not baseY then
+		return false -- BaseYを持たない建物(手作りテンプレ等)は従来どおりのフローに委ねる
+	end
+
+	if rng:NextNumber() >= RUBBLE_CHANCE then
+		return false
+	end
+
+	-- 二重破壊の防止(既にDestructibleタグは外れているが念のため)+ 全壊判定・破壊率・
+	-- スナイパー屋上候補(EnemyManager.findRooftopCandidates)から外す(BuildingIdを外す)
+	CollectionService:RemoveTag(part, "Destructible")
+	part:SetAttribute("BuildingId", nil)
+
+	local newHeight = math.min(part.Size.Y, RUBBLE_HEIGHT) -- 元のサイズより大きくはしない
+	part.Size = Vector3.new(part.Size.X * RUBBLE_SPREAD, newHeight, part.Size.Z * RUBBLE_SPREAD)
+
+	-- 位置はX/Zをそのまま、YだけBaseYに接地させる。向きは元の壁面方向を保ったまま
+	-- 少しだけ回して(±15度)整列した人工的な見た目を崩す
+	local rotationOnly = part.CFrame - part.CFrame.Position
+	local pos = Vector3.new(part.Position.X, baseY + newHeight / 2, part.Position.Z)
+	part.CFrame = CFrame.new(pos) * rotationOnly * CFrame.Angles(0, math.rad(rng:NextNumber(-15, 15)), 0)
+
+	part.Color = RUBBLE_COLOR
+	part.Material = RUBBLE_MATERIAL
+	part.Anchored = true
+	part.CanCollide = false
+	part.CastShadow = false
+
+	registerDestruction(part, ctx)
+	enqueueRubble(part)
+	return true
 end
 
 --------------------------------------------------------------------
@@ -306,14 +417,20 @@ function DestructionManager.Explode(ctx)
 			local budgetLeft = MAX_UNANCHORED - debrisCount
 			local realCap = math.clamp(math.min(ctx.maxReal or MAX_REAL_PER_EXPLOSION, budgetLeft), 0, #hits)
 
-			-- 一括処理: 順次崩落させず、この爆発ぶんをまとめて処理して軽く保つ
+			-- 一括処理: 順次崩落させず、この爆発ぶんをまとめて処理して軽く保つ。
+			-- 残骸化(tryRubbleify)はreal/excessどちらの枠も消費しない別枠の抽選のため、
+			-- realCapとの比較は「残骸にならなかった数(realAssigned)」で行う(Step V-3)
 			local excessCount = 0
-			for i, part in ipairs(hits) do
-				if i <= realCap then
-					destroyBlockReal(part, ctx)
-				else
-					destroyBlockExcess(part, ctx)
-					excessCount += 1
+			local realAssigned = 0
+			for _, part in ipairs(hits) do
+				if not tryRubbleify(part, ctx) then
+					if realAssigned < realCap then
+						destroyBlockReal(part, ctx)
+						realAssigned += 1
+					else
+						destroyBlockExcess(part, ctx)
+						excessCount += 1
+					end
 				end
 			end
 
@@ -356,6 +473,22 @@ function DestructionManager.ClearAllDebris()
 	end
 	head, tail = 1, 0
 	debrisCount = 0
+end
+
+-- 残っている残骸をすべて即時削除する(ラウンド終了時。Step V-3)。
+-- Map:Destroy()でパーツ自体は消えるが、この内部キューの状態は別途リセットしないと
+-- 次ラウンドのMaxTotal判定・head/tailがずれるため必ず呼ぶこと
+function DestructionManager.ClearAllRubble()
+	while rubbleHead <= rubbleTail do
+		local entry = rubbleQueue[rubbleHead]
+		rubbleQueue[rubbleHead] = nil
+		rubbleHead += 1
+		if entry then
+			removeRubble(entry)
+		end
+	end
+	rubbleHead, rubbleTail = 1, 0
+	rubbleCount = 0
 end
 
 return DestructionManager

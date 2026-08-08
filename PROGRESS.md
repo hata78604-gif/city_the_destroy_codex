@@ -1200,3 +1200,45 @@ C-5(火・煙。フェーズB)は今回のスコープ外。
 - タブレット実機での30fps・メモリ確認(残骸はパーツの書き換えのみで新規生成しないため、
   瓦礫ほど重くならない想定だが未検証)
 - 確認が完了したらフェーズB(火・煙)着手の可否を判断する
+
+---
+
+# 固定MAP対応 Phase 1(2026-08-08)
+
+## 実装内容
+
+- `ServerScriptService/Modules/MapRuntime.lua`を新設。Rojo管理外の
+  `ServerStorage.FixedMapTemplate`をラウンドごとに検証・Cloneして`workspace.Map`へ配置する
+- 原本検証は旧`workspace.Map`の削除前に行う。必須構造は`Buildings`、`StaticGeometry`、
+  `Metadata/MapBounds`。`MapBounds`が回転している場合は誤った境界を使わずエラー停止する
+- `Buildings`直下のModelへ名前順で連番`BuildingId`を割り当て、深いModel階層を含む全BasePartを走査。
+  `Indestructible=true`以外へ`Destructible`タグと`BuildingId`を付与する
+- 建物Modelに数値`BaseY`が設定済みなら手動値を優先。無ければ配下BasePartの回転込みワールドAABBの
+  最小Yから自動算出する。破壊率用`buildings`と`bounds`を含むMapContextを返す
+- `GameManager.server.lua`は`CityGenerator.Clear()/Generate()`の代わりに
+  `MapRuntime.LoadRound()`を使用する。`LOBBY → BATTLE → RESULT`の進行と集計方法は維持した
+- `DestructionManager.lua`の残骸処理だけを小規模変更し、直接Parentではなく祖先方向へ
+  同じ`BuildingId`と数値`BaseY`を持つ建物Modelを探索するようにした。爆発・瓦礫・スコア・破壊率の
+  基本ロジックは変更していない
+- `VisualSetup.lua`の自動Terrain生成を停止し、Lighting設定だけを維持した
+- `Config.Threat.Enabled=false`とし、固定MAP Phase 1では道路・敵システムを停止した。
+  将来`EnemyManager.SetMapContext(context)`を接続できるよう、GameManagerではMapContextを保持する
+
+## Phase 1の未対応・残る未検証
+
+- `NPCSpawns`、`SniperSpawns`、`EnemySpawns`、`RoadNodes`は未実装
+- EnemyManager/ThreatManagerの固定MAP対応は未実装。★1・★2を含む敵システムはPhase 1では無効
+- `MapBounds`の回転は未対応。`Orientation=0,0,0`のみ許可する
+- 固定MAP全体のパーツ数を`Config.Performance.MaxTotalParts`で制限する処理は行わない。35,000は
+  旧CityGeneratorの上限値として残るため、固定MAPはStudio側で負荷を確認する
+- 固定MAPのタブレット実機でのfps・メモリ負荷は未検証
+
+## Studio実プレイ確認結果(2026-08-09)
+
+- `ServerStorage.FixedMapTemplate`からの固定MAPロードと、通常のブロック破壊が正常に動作することを確認
+- 初回確認で、残骸化経路が`BuildingId`を削除してから`registerDestruction`を呼んでいたため、
+  残骸化したパーツが`building.destroyed`へ加算されず、90%全壊判定に到達しにくい不具合を確認
+- `tryRubbleify()`の処理順だけを修正し、`BuildingId`が残っている状態で`registerDestruction`を呼んだ後、
+  `BuildingId`を削除して残骸キューへ登録するようにした
+- 修正後の実プレイで、残骸が混ざった建物を90%以上破壊したとき、
+  **建物全壊500点**と**タイマー+10秒**が正常に1回だけ発生することを確認

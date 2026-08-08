@@ -51,7 +51,7 @@ local rng = Random.new()
 -- blastListeners は爆風の影響を受けるモジュール群(NPCManager等)。Explode終了時に全員へctxをそのまま渡す
 local deps = nil
 
--- 建物の破壊状況(CityGenerator.Generate() の戻り値をそのまま持つ。棟数が増えても対応)
+-- 建物の破壊状況(MapRuntime.LoadRound() の戻り値をそのまま持つ。棟数が増えても対応)
 local buildings = {}
 
 -- 瓦礫キュー(古い順)。table.remove を避けるため head/tail 方式
@@ -275,7 +275,7 @@ end
 -- その場で潰れた黒い塊に作り変えて残す。新規パーツは生成しない(既存パーツの書き換え)。
 --
 -- 対象は建物ブロック(BuildingId付き)のみ。石垣・街小物は対象外。
--- 建物の親Modelから BaseY(接地Y)が取れない場合は残骸化せず false を返し、
+-- 建物の祖先Modelから BaseY(接地Y)が取れない場合は残骸化せず false を返し、
 -- 呼び出し側が従来どおり destroyBlockReal/destroyBlockExcess へフォールバックする。
 --
 -- 吹き飛ばし演出は行わない(一度も物理化しない)。既存の位置(X/Z)にそのまま留まり、
@@ -283,6 +283,20 @@ end
 --
 -- 戻り値: true=残骸化した(呼び出し側は他の処理を行わない) / false=対象外・抽選外れ
 --------------------------------------------------------------------
+local function findBuildingModel(part, buildingId)
+	local map = workspace:FindFirstChild("Map")
+	local current = part.Parent
+	while current and current ~= map do
+		if current:IsA("Model")
+			and current:GetAttribute("BuildingId") == buildingId
+			and typeof(current:GetAttribute("BaseY")) == "number" then
+			return current
+		end
+		current = current.Parent
+	end
+	return nil
+end
+
 local function tryRubbleify(part, ctx)
 	if not RUBBLE_ENABLED then
 		return false
@@ -293,10 +307,10 @@ local function tryRubbleify(part, ctx)
 		return false -- 石垣・街小物など建物ブロック以外は対象外
 	end
 
-	local parentModel = part.Parent
-	local baseY = parentModel and parentModel:GetAttribute("BaseY")
-	if not baseY then
-		return false -- BaseYを持たない建物(手作りテンプレ等)は従来どおりのフローに委ねる
+	local buildingModel = findBuildingModel(part, buildingId)
+	local baseY = buildingModel and buildingModel:GetAttribute("BaseY")
+	if typeof(baseY) ~= "number" then
+		return false -- BaseYを持つ建物Modelが見つからなければ従来どおりのフローに委ねる
 	end
 
 	if rng:NextNumber() >= RUBBLE_CHANCE then
@@ -306,7 +320,6 @@ local function tryRubbleify(part, ctx)
 	-- 二重破壊の防止(既にDestructibleタグは外れているが念のため)+ 全壊判定・破壊率・
 	-- スナイパー屋上候補(EnemyManager.findRooftopCandidates)から外す(BuildingIdを外す)
 	CollectionService:RemoveTag(part, "Destructible")
-	part:SetAttribute("BuildingId", nil)
 
 	local newHeight = math.min(part.Size.Y, RUBBLE_HEIGHT) -- 元のサイズより大きくはしない
 	part.Size = Vector3.new(part.Size.X * RUBBLE_SPREAD, newHeight, part.Size.Z * RUBBLE_SPREAD)
@@ -324,6 +337,7 @@ local function tryRubbleify(part, ctx)
 	part.CastShadow = false
 
 	registerDestruction(part, ctx)
+	part:SetAttribute("BuildingId", nil)
 	enqueueRubble(part)
 	return true
 end

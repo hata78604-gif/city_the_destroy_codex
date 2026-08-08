@@ -15,7 +15,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local Config = require(ReplicatedStorage:WaitForChild("Config"))
 local Modules = ServerScriptService:WaitForChild("Modules")
-local CityGenerator = require(Modules.CityGenerator)
+local MapRuntime = require(Modules.MapRuntime)
 local DestructionManager = require(Modules.DestructionManager)
 local NPCManager = require(Modules.NPCManager)
 local WeaponServer = require(Modules.WeaponServer)
@@ -75,7 +75,7 @@ EnemyManager.Init({
 	addScore = WeaponServer.AddScore,
 	addTime = RoundClock.Add,
 	getRemaining = RoundClock.Remaining,
-	roadLines = CityGenerator.GetRoadLines(), -- 生成状態に依存しない純計算値なのでここで1回呼べばよい
+	roadLines = nil, -- 固定MAP Phase 1では敵・道路未対応。将来SetMapContext(context)へ置換する
 	effectRemote = remotes.Effect,
 	hudRemote = remotes.Hud,
 })
@@ -167,7 +167,7 @@ end
 task.wait(3) -- 起動直後のロード猶予
 
 while true do
-	-- 1) ロビー: 前ラウンドの後片付け → マップ再生成
+	-- 1) ロビー: 前ラウンドの後片付け → 固定MAPを原本から再ロード
 	roundState = "LOBBY"
 	WeaponServer.SetRoundActive(false)
 	WeaponServer.RemoveToolsFromAll()
@@ -176,9 +176,9 @@ while true do
 	EnemyManager.Clear() -- ★Step2で追加(NPCManager.Clear()の隣。敵モデル・攻撃タイマー全消去)
 	DestructionManager.ClearAllDebris()
 	DestructionManager.ClearAllRubble()
-	CityGenerator.Clear()
-
-	local buildings = CityGenerator.Generate()
+	local mapContext = MapRuntime.LoadRound()
+	local buildings = mapContext.buildings
+	-- Phase 2以降、敵対応時はここでEnemyManager.SetMapContext(mapContext)を呼べる構造にする。
 	DestructionManager.SetBuildings(buildings)
 	runPhase("LOBBY", Config.Round.LobbyTime)
 

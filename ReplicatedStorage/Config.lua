@@ -33,7 +33,7 @@ Config.Visual = {
 		AtmosphereHaze = 1.5,
 	},
 
-	TerrainEnabled = true, -- 草地Terrainの生成ON/OFF
+	TerrainEnabled = false, -- 固定MAP Phase 1ではTerrainを自動生成しない
 	TerrainDecoration = true, -- 揺れる草(重い場合はfalseに。効果大)
 
 	-- 建物パレット(棟ごとに1つ選ばれる。壁の材質・色/窓枠の差し色/屋根)。
@@ -356,7 +356,7 @@ Config.Score = {
 
 -- ▼ 敵システム(★1〜) --------------------------------------------------
 Config.Threat = {
-	Enabled = true, -- false にすると敵システム全体が無効(切り分け用)
+	Enabled = false, -- 固定MAP Phase 1では道路・敵スポーン未対応のため無効
 	ScoreSource = "sum", -- "sum"=全プレイヤーのスコア合計 / "top"=最高スコア
 	CheckInterval = 1, -- 段階判定を行う間隔(秒)
 	DebugLog = true, -- 段階到達時刻・湧き・撃破をサーバーログに出す(閾値チューニング用)
@@ -401,8 +401,7 @@ Config.Threat = {
 	Spawn = {
 		MinDistanceFromPlayer = 100, -- この距離以内には湧かせない
 		Interval = 0.4, -- 1体ずつ間を空けて湧かせる(生成負荷の平準化)
-		-- 湧き位置の候補は CityGenerator.GetRoadLines() から取得する。
-		-- 座標をここにコピーしてはならない(GRID_SIZE変更時に食い違うため)
+		-- 固定MAPの湧き位置は将来MapRuntimeのMapContextから受け取る。
 		-- 交差点中心から警官を散らす最大距離(stud)。上げてよいのは「まだ重なって見える」場合のみ、
 		-- 8を上限とする(道路幅16の半分)。大きくしすぎるとバズーカ1発でまとめて倒せなくなる(手順6)
 		Jitter = 6,

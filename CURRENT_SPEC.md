@@ -5,7 +5,7 @@
 これは**変更指示書ではない**。以下のファイルを読んで書き起こした「今こうなっている」という現状のスナップショットである:
 
 `ReplicatedStorage/Config.lua` / `ServerScriptService/GameManager.server.lua` /
-`ServerScriptService/Modules/CityGenerator.lua` / `DestructionManager.lua` / `NPCManager.lua` / `WeaponServer.lua` /
+`ServerScriptService/Modules/MapRuntime.lua` / `CityGenerator.lua` / `DestructionManager.lua` / `NPCManager.lua` / `WeaponServer.lua` /
 `StarterPlayer/StarterPlayerScripts/WeaponClient.client.lua` / `EffectsClient.client.lua` / `UIController.client.lua`
 
 `archive/` 内の `roblox_destruction_game_spec.md`・`city_expansion_spec.md`・`visual_upgrade_spec.md`・
@@ -21,17 +21,21 @@ ReplicatedStorage
 ├─ Config (ModuleScript)                共有設定。全モジュールがrequire
 └─ BuildingTemplates (Folder・任意)      手作り建物Model置き場(現状: 従来モードのみで使用)
 
+ServerStorage (Studio側で手動管理。Rojo管理外)
+└─ FixedMapTemplate                     固定MAP原本(Buildings/StaticGeometry/Metadataを持つ)
+
 ServerScriptService
 ├─ GameManager (Script)                 ラウンド進行の司令塔
 └─ Modules (Folder)
-   ├─ CityGenerator (ModuleScript)      街の手続き生成(グリッドモード/従来モード)
+   ├─ MapRuntime (ModuleScript)         固定MAPの検証・ラウンド単位Clone・破壊メタデータ構築
+   ├─ CityGenerator (ModuleScript)      旧手続き生成(固定MAP版では未使用・互換保管)
    ├─ DestructionManager (ModuleScript) 爆発判定・破壊・瓦礫ライフサイクル
    ├─ EnemyManager (ModuleScript)       敵(★1〜)の実体。生成・移動・攻撃・被弾・撃破
    ├─ NPCManager (ModuleScript)         軽量NPC(徘徊・パニック逃走・即死ラグドール)
    ├─ RoundClock (ModuleScript)         バトル残り時間の管理(deadline方式・増減対応・損失キャップ)
    ├─ ThreatManager (ModuleScript)      段階(★)の政策。スコア監視・昇格・編成指示
    ├─ WeaponServer (ModuleScript)       武器3種のサーバー処理・スコア集計
-   ├─ VisualSetup (ModuleScript)        ライティング・Terrain草地の初期設定(起動時1回)
+   ├─ VisualSetup (ModuleScript)        ライティングの初期設定(起動時1回。Terrainは生成しない)
    └─ TemplateValidator (ModuleScript)  手作りBuildingTemplatesの検証(従来モードのみで使用)
 
 StarterPlayer/StarterPlayerScripts
@@ -42,8 +46,9 @@ StarterPlayer/StarterPlayerScripts
 
 ### 各モジュールの責務
 
-- **GameManager.server.lua**: `Remotes`フォルダ(RemoteEvent一式)を起動時に自動生成。各モジュールへ依存を注入(`Init`)。ラウンドを `LOBBY → BATTLE → RESULT` の無限ループで回す。LOBBYは`runPhase`(固定長カウントダウン)、BATTLEは`runBattlePhase`(`RoundClock`の残り時間が尽きるまで)で毎秒`RoundState`を全クライアントに通知。**RESULTは手動進行**: `waitForReady()`が`Ready`リモート(誰か1人が「次へ」を押す)または`Config.Round.ResultTimeout`(既定120秒)のどちらか早い方まで待ち、`RoundState`の"RESULT"は1回だけ送信する(毎秒送信はしない)。RESULT突入時にランキングへ撃破数をマージ(`WeaponServer.GetRanking()`の`userId`と`EnemyManager.GetKillCounts()`のPlayerキーを`player.UserId`で突き合わせる。`DisplayName`は一意でないため使わない)、建物の全体破壊率をLOBBYで生成した`buildings`ローカル変数(`DestructionManager`と同じテーブル参照)から集計して`Result`に添える。プレイヤーの入退室・リスポーン時の武器再配布も担当。途中参加者には`onPlayerAdded`内で現在の`roundState`を`RoundState:FireClient`で個別送信する(RESULTが毎秒送信でなくなったための補完)。
-- **CityGenerator.lua**: `Generate()`で街を1つ生成し、建物ごとの情報テーブル(`{name, total, destroyed, bonusGiven, center}`)を返す。`USE_GRID_MODE`(ファイル内ローカル定数)で処理を分岐(詳細は3節)。パーツ数上限は`overBudget()`で常時チェックし、超えたら以降の生成を打ち切る。`GetRoadLines()`/`GetCityBounds()`で道路中心線・街の外周座標を取得できる(グリッドモード限定。従来モードでは`nil`を返す)。
+- **GameManager.server.lua**: `Remotes`フォルダ(RemoteEvent一式)を起動時に自動生成。各モジュールへ依存を注入(`Init`)。ラウンドを `LOBBY → BATTLE → RESULT` の無限ループで回す。LOBBYごとに`MapRuntime.LoadRound()`で固定MAPを再ロードし、その`buildings`を`DestructionManager`へ渡す。LOBBYは`runPhase`(固定長カウントダウン)、BATTLEは`runBattlePhase`(`RoundClock`の残り時間が尽きるまで)で毎秒`RoundState`を全クライアントに通知。**RESULTは手動進行**: `waitForReady()`が`Ready`リモート(誰か1人が「次へ」を押す)または`Config.Round.ResultTimeout`(既定120秒)のどちらか早い方まで待ち、`RoundState`の"RESULT"は1回だけ送信する(毎秒送信はしない)。RESULT突入時にランキングへ撃破数をマージし、建物の全体破壊率を同じ`buildings`テーブルから集計して`Result`に添える。
+- **MapRuntime.lua**: `ServerStorage.FixedMapTemplate`と必須構造を、既存`workspace.Map`の削除前に検証する。正常ならCloneを`workspace.Map`として配置し、`Buildings`直下の各Modelへ連番`BuildingId`を割り当てる。各建物配下の全BasePartのうち`Indestructible=true`でないものに`Destructible`タグと`BuildingId`を設定し、破壊率用`buildings`テーブルを作る。Modelに数値`BaseY`があれば優先し、無ければ全BasePartのワールドAABB下端から自動算出する。`Metadata.MapBounds`は`Orientation=(0,0,0)`だけを許可し、`Position`と`Size`から`minX/maxX/minZ/maxZ`を計算する。戻り値は`{map, buildings, bounds}`。
+- **CityGenerator.lua**: 旧グリッド/従来モードの手続き生成コード。ファイルは互換・参照用に残すが、固定MAP Phase 1の`GameManager`からはrequireも呼び出しもされない。
 - **DestructionManager.lua**: `Explode(ctx)`(`ctx = {position, radius, attacker, source, scoreScale?, maxReal?, bonusPolicy?, silent?}`という単一テーブル引数)が全武器の爆発処理の唯一の入口。破壊対象("Destructible"タグ)の検出・本物/ダミー破片への振り分け・瓦礫キュー管理・スコア加算・建物破壊率集計・全壊ボーナス判定・爆風の影響を受けるモジュール群への委譲(`deps.blastListeners`配列。現状は`NPCManager.OnExplosion`と`EnemyManager.OnExplosion`の2件を登録)を行う。
 - **EnemyManager.lua**: 敵(★1〜)の実体。`NPCManager`の軽量設計(Humanoid不使用・全パーツAnchored・共有Heartbeatで補間移動)を手法としてコピーしている(`NPCManager`自体は変更しない)。個体生成は`spawnEnemy(type, position, squadId)`の単一入口(パトカーの降車もここを通る)。道路交点(`CityGenerator.GetRoadLines()`の直積)から`Config.Threat.Spawn.MinDistanceFromPlayer`以上離れた点を選んで湧く。移動は`etype.Movement`で分岐する:`"direct"`(既定)は`AttackRange`を境に`ApproachSpeed`/`MoveSpeed`の2段階で直進。`"road"`(パトカー用。Step3)は道路網の交点だけを経由してプレイヤーへ接近する専用AI(マンハッタン経路構築・車線オフセット・中間ウェイポイントは距離ではなく「通り過ぎたか」を内積で判定・向き補間)。攻撃は赤いビーム予告(`Config.Threat.Damage.BeamDuration`秒だけ画面に残る、見た目専用)を出したうえで、判定タイミング(敵種別の`Telegraph`。既定`Config.Threat.Damage.DefaultTelegraph=0`)が0なら同一フレームで同期的に、正の値ならその秒数後に`task.delay`で、`resolveAttack`が距離・遮蔽を再判定してから命中判定を行う(判定タイミングと見た目の表示時間は別々の値)。撃破時は`NPCManager.killNpc`と同じ手法でラグドール化し(`CollisionGroup="Debris"`を流用)、`Config.Threat.CorpseDespawnTime`後に消える(`DestructionManager`の瓦礫キューには入れない)。`workspace.Enemies`に配置し、`Destructible`タグは付けない。`CityGenerator.GetRoadLines()`が`nil`/空を返した場合(従来モード等)は`warn`を1回出して自身を無効化し、以降は何もしない。撃破数の集計(`GetKillCounts()`。Playerオブジェクトをキーに持つ`{[Player]=number}`をシャローコピーして返す。種類は問わない合計)もここが担当し、リザルトの表示に使われる。`Clear()`で`killCounts`をリセットする(RESULTで読み終えた後のLOBBYで呼ばれるため順序は問題ない)。
   - **降車(`DeployOnArrive`。Step3)**: `etype.DeployOnArrive=true`の敵は目的地到着時に`etype.DeployType`を`DeployCount`体生成する(`deployFromCar`)。生成は`spawnEnemy`を通り、**親の`squadId`をそのまま引き継ぐ**(引き継がないと編成の全滅判定`CountAlive(squadId)`が壊れる)。到着できないまま`DeployFallbackTime`秒経つと強制的に降ろす保険がある(「Step3の設計判断」§9-8参照。**コード実装済み・異常系の発火は実機未検証**)。
@@ -53,7 +58,7 @@ StarterPlayer/StarterPlayerScripts
 - **RoundClock.lua**: バトル残り時間の唯一の持ち主。`Start(base)`/`Remaining()`/`Add(delta, reason, player)`/`Stop()`を持つ。内部はdeadline方式(`endsAt = os.clock() + 残り秒数`)で、`task.wait`のドリフトを吸収する。`Add`は`running=false`(LOBBY/RESULT中)なら何もせず0を返す。上限(`Config.Round.BattleTimeMax`)・下限フロア(`Config.Round.BattleTimeFloor`)のクランプに加え、**損失キャップ**(直近60秒の累計損失が`deps.maxLossPerMinute`を超えないようにクリップ。`Config.Threat.Damage.MaxLossPerMinute`を`GameManager`経由で受け取る。0で無効)を行い、実際に反映された秒数を返す。キャップで完全にブロックされた瞬間(残り予算0)だけサーバーログに出す。
 - **NPCManager.lua**: Humanoidを使わない軽量NPC。徘徊(共有Heartbeat)・即死ラグドール・パニック逃走・フェード消滅・頭数維持を担当。`OnExplosion(ctx)`で爆風を受ける(内部ロジックは`ctx`化の影響を受けていない)。
 - **WeaponServer.lua**: バズーカ(直進弾+レイキャスト)・エアストライク(矩形マーカー予告+編隊による絨毯爆撃)・リモート爆弾(クリック位置設置+起爆)の3武器を実装。エアストライクは`PlaneCount`機がプレイヤー→クリック地点の向きに引いた爆撃線の上を通過しながら`BombsPerPlane`発ずつ投下する(`buildSchedule`/`planeLateral`/`buildPlane`)。**戦闘機の速度・投下地点・飛行時間はすべて投下スケジュールから導出**しており、独立した入力値を持たない(§12-4)。各爆発は`maxReal = MaxRealPerBomb`で`Explode`を呼び、`scoreScale`は渡さない(連鎖ボーナスはリモート爆弾専用)。リモート爆弾は設置時に`MaxPlaceDistance`の**水平距離**判定を行い、超過時は爆弾を作らず・設置数もクールダウンも消費せず`Hud "notice"`を本人にだけ送る(`placeBomb`。判定はサーバー側のみで、クライアントは変更していない)。起爆時は同時起爆数から`chainMultiplier()`で倍率を求め、各`Explode(ctx)`に`scoreScale`として渡したうえで`Hud "chain"`を送る(×1のときは送らない)。ツール配布、`leaderstats`スコア管理、クールダウン管理もここ。`GetTotalScore()`は`ThreatManager`の段階判定用(`Config.Threat.ScoreSource`で合計/最高を切替)。`GetRanking()`の各エントリには`userId`(`player.UserId`)も含む(`name`/`score`は従来どおり。`GameManager`が`EnemyManager.GetKillCounts()`とこの`userId`で突き合わせて撃破数をマージする。`DisplayName`は一意でないため使わない)。
-- **VisualSetup.lua**: 起動時1回だけライティング(明るさ・時刻・霞み)とTerrain草地を設定。`Lighting.Technology`だけはスクリプトから変更できないため手動設定が必要(SETUP.md参照)。
+- **VisualSetup.lua**: 起動時1回だけライティング(明るさ・時刻・霞み)を設定する。固定MAP版ではTerrainを生成・消去しない。`Lighting.Technology`だけはスクリプトから変更できないため手動設定が必要(SETUP.md参照)。
 - **TemplateValidator.lua**: `ReplicatedStorage/BuildingTemplates`内のModelを検証し、パーツ数・サイズの警告を出す。従来モード(`chooseBuildingSource`)からのみ呼ばれる。**グリッドモードでは呼ばれない**。
 - **WeaponClient.client.lua**: PCは`Tool.Activated`でのクリック発射(`Mouse.Hit.Position`をサーバーへ送信。バズーカは押しっぱなしで連射)。モバイルは`UserInputService.TouchTapInWorld`で3Dワールドをタップした地点へその場で1発だけ発射する(押しっぱなし連射は無し。詳細は§14-9参照)。数字キー1/2/3での武器切替、Fキー起爆も担当。UIControllerとは`WeaponClientEvents`フォルダ内のBindableEvent(`EquipRequest`/`DetonateRequest`/`WeaponSelected`)で連携。
 - **EffectsClient.client.lua**: `Effect`リモートを受けて爆発(火花+煙+閃光+音+カメラシェイク)・絨毯爆撃の矩形マーカー(`"marker"`。`length`/`width`/`direction`を受け取り`CFrame.lookAt`で向きを付ける。Instanceは1個だけ)・戦闘機の飛行音(`"jet"`)・建物崩壊の粉塵・NPC撃破エフェクト・各種効果音を再生。**多数の爆発が短時間に連続したときの演出の合流処理**を持つ: カメラシェイクは加算ではなく`math.max`で更新し(§12-5)、爆発音は`playSound`の`dedupeInterval`引数(0.1秒)で間引く。どちらも爆発全般に効くので、絨毯爆撃18発でもリモート爆弾10連鎖でも同じように抑えられる。`"timeGain"`/`"timeLoss"`はタイム増減音で、3D減衰させないためカメラ位置基準で再生する(`data.position`は常にnilで届く)。敵関連: `"enemySpawn"`(湧き演出)・`"enemyAim"`(赤い予告ビーム。`duration`秒でフェード後Destroy)・`"enemyShotHit"`(被弾音+シェイク)・`"enemyShotMiss"`(はずれ音のみ)・`"enemyKill"`(撃破演出)・`"enemyDeploy"`(Step3手順7。パトカーの位置から青いリングが半径2→12まで広がりつつ`Transparency`が1へ、0.4秒でDestroy。生成するInstanceは1個のみ)・`"threatUp"`(段階昇格音。`Config.Sounds[data.sound]`)。**被弾フラッシュ(`Hits>1`の敵が光る演出)はリモートを使わずEnemyManager内で完結する**(EffectsClientの担当ではない)。
@@ -66,7 +71,7 @@ StarterPlayer/StarterPlayerScripts
 ### Config.Performance
 | キー | 値 | 備考 |
 |---|---|---|
-| MaxTotalParts | 35000 | 生成直後の総パーツ数上限。Step V-2で20000→35000(RoadWidth拡大・街小物のDestructible化ぶんの余裕) |
+| MaxTotalParts | 35000 | 旧CityGenerator用の生成上限。固定MAP Phase 1のMapRuntimeはこの値による打ち切りを行わない |
 | MaxUnanchoredParts | 1000 | 同時に物理挙動する瓦礫の上限 |
 | DebrisLifetime | 8 | 瓦礫が透明化を始めるまでの秒数 |
 
@@ -79,7 +84,7 @@ StarterPlayer/StarterPlayerScripts
 | Lighting.ClockTime | 14 |
 | Lighting.AtmosphereDensity | 0.35 |
 | Lighting.AtmosphereHaze | 1.5 |
-| TerrainEnabled | true |
+| TerrainEnabled | false(固定MAP版ではVisualSetupによるTerrain生成を停止) |
 | TerrainDecoration | true |
 | BuildingPalettes | 5種(白い家/ベージュの家/レンガの店/コンクリビル/ガラスビル。各material・wallColors×3・frameColor・roofMaterial・roofColor。Step V-1で3種→5種に刷新、壁は低彩度・屋根は全パレット共通で濃いグレー〜黒に統一) |
 | StoneWall.Enabled | true(グリッドモードは`buildGridStoneWalls`、従来モードは`buildStoneWalls`が使用。Step V-1でグリッドモードも有効化) |
@@ -268,7 +273,7 @@ StarterPlayer/StarterPlayerScripts
 ### Config.Threat(★1〜)
 | キー | 値 | 備考 |
 |---|---|---|
-| Enabled | true | falseで敵システム全体を無効化(切り分け用)。ThreatManagerの監視ループが即returnする |
+| Enabled | false | 固定MAP Phase 1では道路・敵スポーン未対応のため無効。trueへ戻すのはMapContext連携後 |
 | ScoreSource | "sum" | "sum"=全プレイヤーのスコア合計 / "top"=最高スコア。`WeaponServer.GetTotalScore()`が参照 |
 | CheckInterval | 1 | 段階判定を行う間隔(秒) |
 | DebugLog | true | 段階到達時刻・湧き・撃破をサーバーログに出す |
@@ -404,12 +409,32 @@ StarterPlayer/StarterPlayerScripts
 
 ---
 
-## 3. 街生成の仕組み(`CityGenerator.lua`)
+## 3. 固定MAPのロード(`MapRuntime.lua`)
+
+固定MAP原本はRojo管理外の`ServerStorage.FixedMapTemplate`へStudioで手動配置する。必須構造は次のとおり。
+
+```
+FixedMapTemplate (ModelまたはFolder)
+├─ Buildings (Folder)
+├─ StaticGeometry (Folder)
+└─ Metadata (Folder)
+   └─ MapBounds (BasePart)
+```
+
+`LoadRound()`は原本・上記構造・`MapBounds`の無回転を先に検証し、検証成功後だけ既存`workspace.Map`を削除してCloneする。`Buildings`直下のModelを名前順に並べて連番`BuildingId`を割り当て、各Model配下の深い階層までBasePartを走査する。`Indestructible=true`のBasePartは破壊対象から外し、それ以外に`Destructible`タグと同じ`BuildingId`を設定する。
+
+建物Modelの`BaseY`が数値なら手動値を維持する。属性が無い、または数値でない場合は、配下の全BasePartについて回転込みのワールドAABBを求め、その最小Yを設定する。BasePartが無いModelはPivotのYへフォールバックして警告する。
+
+Phase 1の`Metadata.MapBounds`は`Orientation = 0, 0, 0`が必須。回転を検出した場合はエラーとして、誤った境界でラウンドを続行しない。境界値は`Position ± Size/2`から`minX/maxX/minZ/maxZ`を作り、`LoadRound()`は`{map, buildings, bounds}`を返す。
+
+### 旧CityGenerator仕様(固定MAP版では未使用・参考)
+
+以下は互換保管されている`CityGenerator.lua`の説明であり、現在の`GameManager`からは実行されない。
 
 ### モード切替(ファイル冒頭のローカル定数。Configには出ていない)
 
 ```lua
-local USE_GRID_MODE = true          -- ★本番。false=従来の十字路街(凍結中)
+local USE_GRID_MODE = true          -- 旧CityGenerator内の設定。固定MAP版では参照されない
 local GRID_SIZE = 4                 -- N×N街区
 local TILE_BUILDINGS_PER_EDGE = 2   -- 1街区の1辺あたりの建物数(P)
 local GRID_GAP = 12
@@ -470,7 +495,7 @@ GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 24+108 = 132  -- St
 1. `Effect`リモートで`"explosion"`を全クライアントに送信(見た目の演出はEffectsClient側。この送信自体はダメージと無関係)
 2. `workspace.Map`から`GetPartBoundsInRadius`(`OverlapParams`, `Include Map`, `MaxParts=2000`)で半径内のパーツを取得し、`"Destructible"`タグを持つものだけ`hits`に集める
 3. `hits`を爆心からの距離で昇順ソート
-4. **残骸抽選(`tryRubbleify`。Step V-3)**: real/excessの振り分けより先に、各`hit`ごとに「残骸になるか」を判定する。`BuildingId`が無い(石垣・街小物)、または親Modelに`BaseY`属性が無い(現状は手作りテンプレート建物のみ該当。§3参照)場合は対象外。対象かつ`Config.Rubble.Chance`の抽選に当たったパーツは、物理化を一切せず(飛ばさない)その場で潰れた残骸に作り変えて`registerDestruction`を呼び、real/excessどちらの枠も消費せず処理を終える(詳細は§20)
+4. **残骸抽選(`tryRubbleify`。Step V-3)**: real/excessの振り分けより先に、各`hit`ごとに「残骸になるか」を判定する。`BuildingId`が無い、または`workspace.Map`まで祖先方向へ探索しても同じ`BuildingId`と数値`BaseY`を持つ建物Modelが無い場合は対象外。対象かつ`Config.Rubble.Chance`の抽選に当たったパーツは、物理化を一切せず(飛ばさない)その場で潰れた残骸に作り変えて`registerDestruction`を呼び、real/excessどちらの枠も消費せず処理を終える(詳細は§20)
 5. **C案ハイブリッドの本体**: 残骸にならなかったパーツ(`realAssigned`でカウント)について、`realCap = clamp(min(ctx.maxReal or MaxRealPerExplosion, MAX_UNANCHORED - debrisCount), 0, #hits)`
    - `MaxRealPerExplosion`(30) = 1爆発あたりの本物瓦礫の上限。`ctx.maxReal`で武器ごとに上書き可(現状どの呼び出し元も指定しないため既定値のまま)
    - `MAX_UNANCHORED - debrisCount` = 瓦礫総数(全体で1000)の残り枠。枠が無ければ`realCap=0`になり自動的にダミーのみのフォールバックになる
@@ -504,21 +529,17 @@ GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 24+108 = 132  -- St
 
 ## 6. 確定事項
 
-- パーツ数上限: **`Config.Performance.MaxTotalParts = 35000`**
-- グリッドモード(`GRID_SIZE=4`)の実測総パーツ数: **14,900〜19,300**(上限35000に対して余裕あり。Step V-2で`RoadWidth`拡幅ぶんの街灯増加を含む値。切妻屋根は陸屋根の`buildSlab`より部材が少ないため、建物側は増加分を一部相殺している)
-- ブロックサイズ: **`Config.Block.Size = Vector3(8, 4, 2)`**
-- グリッドサイズ: **`GRID_SIZE = 4`**(`CityGenerator.lua`内のローカル定数)
-- タブレット実機での動作確認: **30fps維持を確認済み**(SETUP.md 6章の判定基準を満たす)
+- 現在のマップ方式: **固定MAP Phase 1**。`ServerStorage.FixedMapTemplate`をラウンドごとにClone
+- `Config.Performance.MaxTotalParts = 35000`は旧CityGenerator用。固定MAPのロード上限としては未適用
+- タブレット実機での30fps確認は旧グリッドMAPでの結果。固定MAPでは未検証
 
-現在の主要な未実装項目は、**★3戦車**、**炎・煙の時間変化**、**手作り建物のグリッド対応**の3点。
-★2軍隊、グリッド用の石垣・街小物、街小物の破壊処理は実装済み。
+旧ゲーム側では★2軍隊、グリッド用の石垣・街小物、街小物の破壊処理まで実装済み。固定MAP版では敵システムを停止しており、固定MAP向けの`NPCSpawns`、`SniperSpawns`、`EnemySpawns`、`RoadNodes`は未実装。★3戦車と炎・煙の時間変化も未実装。
 
 ## 6-1. モード方針
 
-**グリッドモード(`USE_GRID_MODE=true`)が本番。**
-従来モード(`USE_GRID_MODE=false`、十字路1本+`Config.City.Slots`13棟)は**凍結**——コードは削除せず温存しているが、現在は使われていない。切り替えたい場合は`CityGenerator.lua`冒頭の`USE_GRID_MODE`を`false`にするだけで従来動作に戻る。
+**固定MAP(`MapRuntime`)が本番。** `CityGenerator`のグリッドモードと従来モードはどちらも互換保管のみで、現在の`GameManager`からは使用されない。
 
-## 7. 未実装のまま保留(グリッドモード側)
+## 7. 旧グリッドモードの保留事項(参考)
 
 グリッドモードでは以下を**意図的に未実装のまま保留**している:
 
@@ -534,6 +555,8 @@ GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 24+108 = 132  -- St
 されるだけになる(エラーにはならないが、その建物だけ焼け跡が残らない)。
 
 ## 8. 未実装のまま保留(敵システム側)
+
+固定MAP Phase 1では`Config.Threat.Enabled=false`で敵システム全体を停止している。以下は旧ゲーム側の実装状況であり、固定MAPで再び有効化するにはMapContext、スポーン地点、道路ノードの連携が別途必要。
 
 `THREAT_DESIGN_PROPOSAL.md`の段階的実装順序(§6)に沿って、以下を意図的に未実装のまま保留している:
 
@@ -1470,10 +1493,10 @@ Roblox で最も重いのは大量のInstanceの生成・削除であり、既�
 合わせる必要がある。これをRaycastで都度求める設計は採らなかった: 1回の爆発で最大数百
 ブロックが同時に破壊されうるゲームで、その都度Raycastすると爆発のたびにコストが跳ねる。
 
-代わりに、建物生成時(`CityGenerator.buildBuilding`)に建物の`Model`へ`BaseY`属性を
-1回だけ設定しておき、`DestructionManager`はそれを読むだけにした(§3参照)。
-`BaseY`が読めない建物(現状は手作りテンプレートのみ。§7の申し送り参照)のブロックは
-残骸化せず、従来どおり`Destroy`するフォールバックに倒す。
+代わりに、`MapRuntime`がロード時に建物Modelへ`BaseY`属性を1回だけ設定し、
+`DestructionManager`は破壊パーツから祖先方向へ同じ`BuildingId`と数値`BaseY`を持つModelを探して読む。
+Studioで数値`BaseY`を設定済みなら手動値を優先し、未設定時だけ配下BasePartから自動計算する。
+適切な建物Modelが見つからないブロックは残骸化せず、従来どおり`Destroy`するフォールバックに倒す。
 
 ### 20-4. 残骸の抽選はreal/excessの振り分けより先に行う
 

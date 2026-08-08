@@ -3,11 +3,10 @@
 Roblox Studio にスクリプトを配置してゲームを動かすまでの手順書です。
 プログラミングの知識がなくても、上から順にやれば動きます。
 
-> **現在の本番はグリッド街モード**(`CityGenerator.lua`の`USE_GRID_MODE=true`、`GRID_SIZE=4`)。
-> N×Nの街区を格子状に並べた街になっており、石垣・街灯・車・木・ベンチは実装済み。
-> 街小物には`Destructible`タグが付き、爆発で破壊できる。手作り建物のグリッド対応のみ保留中。
-> 従来モード(十字路1本+建物13棟+街灯・車・木+石垣。`USE_GRID_MODE=false`)は凍結中だが
-> コードは残っており、いつでも切り替えられる。
+> **現在の本番は固定MAP Phase 1**。`ServerStorage.FixedMapTemplate`を毎ラウンドCloneして使用する。
+> `CityGenerator.lua`は互換・参照用に残しているが、現在の`GameManager`からは使用しない。
+> 固定MAP原本はRojo管理外のため、Roblox Studio側で手動配置する必要がある(2-4節参照)。
+> Phase 1では敵・道路経路・固定スポーンMetadataは未対応で、`Config.Threat.Enabled=false`としている。
 > **現状の完全な仕様(Configの全キー・生成式・破壊処理・NPCの仕組み)は `CURRENT_SPEC.md` を参照。**
 > 古い変更指示書(`roblox_destruction_game_spec.md`等)は `archive/` に移動済み。
 > 各ステップ完了時、PROGRESS.md に「実装内容・暫定措置・ハマった点・申し送り・ユーザー手作業」を追記する
@@ -35,7 +34,8 @@ Roblox Studio にスクリプトを配置してゲームを動かすまでの手
 ServerScriptService
 ├─ GameManager          (Script)          ← GameManager.server.lua の中身
 └─ Modules              (Folder)
-   ├─ CityGenerator     (ModuleScript)    ← CityGenerator.lua の中身
+   ├─ MapRuntime        (ModuleScript)    ← MapRuntime.lua の中身
+   ├─ CityGenerator     (ModuleScript)    ← CityGenerator.lua の中身(固定MAP版では未使用)
    ├─ DestructionManager(ModuleScript)    ← DestructionManager.lua の中身
    ├─ EnemyManager      (ModuleScript)    ← EnemyManager.lua の中身
    ├─ NPCManager        (ModuleScript)    ← NPCManager.lua の中身
@@ -48,6 +48,13 @@ ServerScriptService
 ReplicatedStorage
 ├─ Config               (ModuleScript)    ← ReplicatedStorage/Config.lua の中身
 └─ BuildingTemplates    (Folder・任意)     ← 自分で作った建物Modelを入れる(7章参照)
+
+ServerStorage                              ← Studio側で手動管理(Rojo管理外)
+└─ FixedMapTemplate    (ModelまたはFolder)
+   ├─ Buildings        (Folder)
+   ├─ StaticGeometry   (Folder)
+   └─ Metadata         (Folder)
+      └─ MapBounds     (BasePart)
 
 StarterPlayer
 └─ StarterPlayerScripts
@@ -63,8 +70,8 @@ StarterPlayer
 >   **ReplicatedStorage の Config 1つに統合**しています(サーバー・クライアント両方が参照)。
 > - `Remotes` フォルダ(RemoteEvent 置き場)は **GameManager が起動時に自動生成**するので、
 >   手作業で作る必要はありません。
-> - 道路・街小物は毎ラウンド `workspace/Map` フォルダごと作り直します。削除対象は
->   Map フォルダに一元化してあるので、使い回し管理は不要です(小物には `CityProp` タグ付き)。
+> - 固定MAPは毎ラウンド`ServerStorage.FixedMapTemplate`から`workspace.Map`へCloneされます。
+>   原本と必須構造の検証に失敗した場合は、既存`workspace.Map`を削除せずエラーで停止します。
 
 ### 2-1. オブジェクトの作り方(共通操作)
 
@@ -82,19 +89,20 @@ StarterPlayer
 |---|---|---|---|---|
 | 1 | ReplicatedStorage | Config | ModuleScript | ReplicatedStorage/Config.lua |
 | 2 | ServerScriptService | Modules | Folder | (フォルダなので貼り付け不要) |
-| 3 | Modules | CityGenerator | ModuleScript | ServerScriptService/Modules/CityGenerator.lua |
-| 4 | Modules | DestructionManager | ModuleScript | ServerScriptService/Modules/DestructionManager.lua |
-| 5 | Modules | NPCManager | ModuleScript | ServerScriptService/Modules/NPCManager.lua |
-| 6 | Modules | WeaponServer | ModuleScript | ServerScriptService/Modules/WeaponServer.lua |
-| 7 | Modules | VisualSetup | ModuleScript | ServerScriptService/Modules/VisualSetup.lua |
-| 8 | Modules | TemplateValidator | ModuleScript | ServerScriptService/Modules/TemplateValidator.lua |
-| 9 | Modules | RoundClock | ModuleScript | ServerScriptService/Modules/RoundClock.lua |
-| 10 | Modules | EnemyManager | ModuleScript | ServerScriptService/Modules/EnemyManager.lua |
-| 11 | Modules | ThreatManager | ModuleScript | ServerScriptService/Modules/ThreatManager.lua |
-| 12 | ServerScriptService | GameManager | **Script** | ServerScriptService/GameManager.server.lua |
-| 13 | StarterPlayerScripts | WeaponClient | **LocalScript** | StarterPlayer/StarterPlayerScripts/WeaponClient.client.lua |
-| 14 | StarterPlayerScripts | EffectsClient | **LocalScript** | StarterPlayer/StarterPlayerScripts/EffectsClient.client.lua |
-| 15 | StarterPlayerScripts | UIController | **LocalScript** | StarterPlayer/StarterPlayerScripts/UIController.client.lua |
+| 3 | Modules | MapRuntime | ModuleScript | ServerScriptService/Modules/MapRuntime.lua |
+| 4 | Modules | CityGenerator(固定MAP版では未使用) | ModuleScript | ServerScriptService/Modules/CityGenerator.lua |
+| 5 | Modules | DestructionManager | ModuleScript | ServerScriptService/Modules/DestructionManager.lua |
+| 6 | Modules | NPCManager | ModuleScript | ServerScriptService/Modules/NPCManager.lua |
+| 7 | Modules | WeaponServer | ModuleScript | ServerScriptService/Modules/WeaponServer.lua |
+| 8 | Modules | VisualSetup | ModuleScript | ServerScriptService/Modules/VisualSetup.lua |
+| 9 | Modules | TemplateValidator | ModuleScript | ServerScriptService/Modules/TemplateValidator.lua |
+| 10 | Modules | RoundClock | ModuleScript | ServerScriptService/Modules/RoundClock.lua |
+| 11 | Modules | EnemyManager | ModuleScript | ServerScriptService/Modules/EnemyManager.lua |
+| 12 | Modules | ThreatManager | ModuleScript | ServerScriptService/Modules/ThreatManager.lua |
+| 13 | ServerScriptService | GameManager | **Script** | ServerScriptService/GameManager.server.lua |
+| 14 | StarterPlayerScripts | WeaponClient | **LocalScript** | StarterPlayer/StarterPlayerScripts/WeaponClient.client.lua |
+| 15 | StarterPlayerScripts | EffectsClient | **LocalScript** | StarterPlayer/StarterPlayerScripts/EffectsClient.client.lua |
+| 16 | StarterPlayerScripts | UIController | **LocalScript** | StarterPlayer/StarterPlayerScripts/UIController.client.lua |
 
 > `StarterPlayerScripts` は `StarterPlayer` の中に最初からあります(新しく作らない)。
 
@@ -107,9 +115,21 @@ StarterPlayer
 3. `ファイル → 保存` する。**設定はファイルに保存されるので、この作業は1回だけでOK**
 
 > Technology は**スクリプトから変更できない**ため、この手動設定が必須です。
-> その他のライティング(明るさ・時刻・霞み)と草地Terrainは VisualSetup が自動で設定します。
-> なお「揺れる草」はRobloxのバージョンによってスクリプトから切り替えられないことがあります。
-> 草が揺れない場合は、Explorer で **Terrain** を選び、プロパティの **Decoration** をオンにしてください。
+> その他のライティング(明るさ・時刻・霞み)はVisualSetupが自動で設定します。
+> 固定MAP版ではTerrainを自動生成しません。Terrainが必要ならFixedMapTemplateと合わせてStudio側で準備してください。
+
+### 2-4. FixedMapTemplateの手動準備(必須)
+
+1. Explorerの`ServerStorage`直下に、`FixedMapTemplate`という名前のModelまたはFolderを作る
+2. その直下に`Buildings`、`StaticGeometry`、`Metadata`という3つのFolderを作る
+3. `Buildings`直下へ、破壊率を個別集計したい建物を1棟につき1つのModelとして配置する
+4. 道路・地面など建物集計に含めないものを`StaticGeometry`へ配置する
+5. `Metadata`直下に透明化用のBasePartを`MapBounds`という名前で作り、固定MAP全体のXZ範囲を覆うよう`Position`と`Size`を設定する
+6. `MapBounds.Orientation`を必ず`0, 0, 0`にする。回転している場合はロードをエラー停止する
+7. 壊したくない建物内BasePartにはBoolean属性`Indestructible=true`を付ける
+8. 特殊な建物だけ残骸の接地高を調整したい場合は、その建物ModelへNumber属性`BaseY`を設定する。未設定なら配下BasePartから自動計算される
+
+`FixedMapTemplate`自体はリポジトリやRojo同期では作成されないため、Studioのplaceファイルへ保存してください。
 
 ---
 
@@ -140,10 +160,13 @@ StarterPlayer
 スクリプトを全部配置したら、以下を順に確認していくと問題の切り分けがしやすいです。
 
 ### Phase 1: 建物を撃って崩せる
-- [ ] プレイ開始から数秒で街(道路の十字路+建物+小物)が生成される
-- [ ] 出力ウィンドウに `[CityGenerator] 生成完了(グリッド街 4x4): 建物ブロック ○○ / 石垣 ○○ / 道路・小物 ○○ / 合計 ○○` と出る(合計35,000以下。実測は14,900〜19,300程度)
+- [ ] プレイ開始から数秒で`ServerStorage.FixedMapTemplate`のCloneが`workspace.Map`として生成される
+- [ ] 出力ウィンドウに`[MapRuntime] 固定MAPをロードしました: 建物 ○棟 / bounds ...`と出る
+- [ ] `Buildings`直下の各Modelに連番`BuildingId`と数値`BaseY`が設定される
+- [ ] 建物配下の深いModel階層にあるBasePartにも`Destructible`タグと同じ`BuildingId`が付く。ただし`Indestructible=true`のBasePartには付かない
 - [ ] 「破壊せよ!」表示後、**1キー(バズーカ)**で建物をクリック → 弾が飛んで爆発し、壁が吹き飛ぶ
 - [ ] 吹き飛んだ瓦礫が約8秒後にスーッと消える
+- [ ] 深いModel階層の建物でも残骸が建物Modelの`BaseY`へ接地し、破壊率・全壊ボーナスが集計される
 
 ### Phase 2: ラウンドが回る・スコアが入る
 - [ ] 画面上部に残り時間、右上にスコアが表示される
@@ -463,7 +486,7 @@ Phase 10の★2確認後、同じ★2昇格でスナイパーの挙動を確認�
 **共通**
 - [ ] Outputに新しいエラー・pending残留の警告が出ない
 
-### 街並み拡張の確認ポイント(グリッドモード。現在の本番)
+### 街並み拡張の確認ポイント(旧CityGeneratorグリッドモード・固定MAP版では対象外)
 - [ ] N×N街区の道路網(車道+歩道)と、各街区の縁に建物が生成される(詳細な計算式はCURRENT_SPEC.md参照)
 - [ ] 建物のパレット(白い家・ベージュの家・レンガの店・コンクリビル・ガラスビル)や窓・階数がラウンドごとに少し変わる
 - [ ] **道路・歩道は爆発しても壊れない**(吹き飛ばない)
@@ -509,7 +532,7 @@ Phase 10の★2確認後、同じ★2昇格でスナイパーの挙動を確認�
 - [ ] ラウンドが何周してもTerrainが二重生成されない(初回のみ生成)
 
 ### 手作り建物の確認ポイント(従来モードのみ。テンプレートを登録した場合)
-> **注意**: 現在の本番(グリッドモード)は手作りテンプレートを組み込んでいない(7節参照)。
+> **注意**: 以下は旧CityGenerator用の参考手順であり、固定MAP Phase 1では使用しない。
 > 以下は`USE_GRID_MODE=false`に切り替えた場合のみ確認できる。
 - [ ] 出力に `[TemplateValidator] ○○: OK (パーツ ○○個)` が出る
 - [ ] 自分の建物が街に混ざって生成され、バズーカで壊せて10点/個・全壊ボーナス500点が入る
@@ -540,7 +563,10 @@ Phase 10の★2確認後、同じ★2昇格でスナイパーの挙動を確認�
 | 症状 | 原因と対処 |
 |---|---|
 | `Infinite yield possible on 'ReplicatedStorage:WaitForChild("Config")'` と黄色い警告 | Config の**名前か場所が違う**。ReplicatedStorage 直下に、名前が正確に `Config`(ModuleScript)であるか確認 |
-| `CityGenerator is not a valid member of Modules` | Modules 内のモジュール名間違い(旧名 BuildingGenerator のままになっていないか確認 → 7章参照) |
+| `MapRuntime is not a valid member of Modules` | `Modules/MapRuntime`の名前・種別・配置を確認する |
+| `[MapRuntime] ServerStorage.FixedMapTemplate が見つかりません` | 2-4節に従ってStudio側へ固定MAP原本を手動配置し、placeを保存する |
+| `[MapRuntime] Metadata.MapBounds は回転不可です` | `MapBounds.Orientation`を`0, 0, 0`へ戻し、必要な範囲は`Position`と`Size`だけで調整する |
+| `CityGenerator is not a valid member of Modules` | 旧CityGenerator版だけのエラー。固定MAP版のGameManagerはCityGeneratorをrequireしない |
 | `Modules is not a valid member of ServerScriptService` | Modules フォルダの名前間違い、または GameManager を別の場所に置いている |
 | 建物が出ない・何も起きない | GameManager を **Script ではなく LocalScript / ModuleScript で作ってしまった**可能性。種別は作り直さないと変えられないので、新しく Script を作って貼り直す |
 | `総パーツ数が上限(35000)に達したため…` と警告が出る | グリッドモードなら`CityGenerator.lua`の`GRID_SIZE`を下げる(4→3→2)。従来モードなら`Config.City.Slots`の行数を減らすか階数を下げる |
@@ -549,7 +575,7 @@ Phase 10の★2確認後、同じ★2昇格でスナイパーの挙動を確認�
 | UIが出ない | UIController が StarterPlayerScripts にあるか、LocalScript か確認 |
 | 爆発音だけ鳴らない | Config の `Sounds.Explosion` の音IDが無効(エラーにはならない仕様)。下記の方法で差し替える |
 | 敵の挙動を丸ごと切り離して他の不具合を切り分けたい | `Config.Threat.Enabled` を `false` にしてテストを再起動する。段階監視・湧き・攻撃が一切動かなくなり、Step 1 までと同じ挙動に戻る |
-| 敵が全く湧かない(道路交差点にも出ない) | 出力ウィンドウに `[EnemyManager] CityGenerator.GetRoadLines()がnil/空を返しました…` が出ていないか確認。`CityGenerator.lua` の `USE_GRID_MODE` が `false`(従来モード)になっていると出る。グリッドモードに戻すか、湧き位置ロジックの対応を待つ |
+| 敵が全く湧かない | 固定MAP Phase 1では仕様どおり。`Config.Threat.Enabled=false`で、EnemySpawns/RoadNodes/MapContext連携は後続Phaseで実装する |
 
 ### 音の差し替え方法
 
@@ -626,7 +652,7 @@ NPCのパニック逃走の強さは `Config.NPC` にあります。
 | 項目 | 内容 |
 |---|---|
 | `Lighting` | 明るさ・時刻(ClockTime=14で昼下がり)・霞み(AtmosphereDensity/Haze) |
-| `TerrainEnabled` | 草地Terrainの生成ON/OFF(falseで従来のベースプレートに戻る) |
+| `TerrainEnabled` | 固定MAP Phase 1ではfalse。VisualSetupはTerrainを生成せず、地面はStudio側で用意する |
 | `TerrainDecoration` | 揺れる草のON/OFF(重いときに切ると効果大) |
 | `BuildingPalettes` | 建物の質感パレット(材質・壁色・窓枠色・屋根)。追加すれば種類が増える |
 | `StoneWall` | 石垣のON/OFF・密度(Spacing=4で隙間なし、8で半分)・色 |

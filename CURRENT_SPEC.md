@@ -46,7 +46,7 @@ StarterPlayer/StarterPlayerScripts
 - **CityGenerator.lua**: `Generate()`で街を1つ生成し、建物ごとの情報テーブル(`{name, total, destroyed, bonusGiven, center}`)を返す。`USE_GRID_MODE`(ファイル内ローカル定数)で処理を分岐(詳細は3節)。パーツ数上限は`overBudget()`で常時チェックし、超えたら以降の生成を打ち切る。`GetRoadLines()`/`GetCityBounds()`で道路中心線・街の外周座標を取得できる(グリッドモード限定。従来モードでは`nil`を返す)。
 - **DestructionManager.lua**: `Explode(ctx)`(`ctx = {position, radius, attacker, source, scoreScale?, maxReal?, bonusPolicy?, silent?}`という単一テーブル引数)が全武器の爆発処理の唯一の入口。破壊対象("Destructible"タグ)の検出・本物/ダミー破片への振り分け・瓦礫キュー管理・スコア加算・建物破壊率集計・全壊ボーナス判定・爆風の影響を受けるモジュール群への委譲(`deps.blastListeners`配列。現状は`NPCManager.OnExplosion`と`EnemyManager.OnExplosion`の2件を登録)を行う。
 - **EnemyManager.lua**: 敵(★1〜)の実体。`NPCManager`の軽量設計(Humanoid不使用・全パーツAnchored・共有Heartbeatで補間移動)を手法としてコピーしている(`NPCManager`自体は変更しない)。個体生成は`spawnEnemy(type, position, squadId)`の単一入口(パトカーの降車もここを通る)。道路交点(`CityGenerator.GetRoadLines()`の直積)から`Config.Threat.Spawn.MinDistanceFromPlayer`以上離れた点を選んで湧く。移動は`etype.Movement`で分岐する:`"direct"`(既定)は`AttackRange`を境に`ApproachSpeed`/`MoveSpeed`の2段階で直進。`"road"`(パトカー用。Step3)は道路網の交点だけを経由してプレイヤーへ接近する専用AI(マンハッタン経路構築・車線オフセット・中間ウェイポイントは距離ではなく「通り過ぎたか」を内積で判定・向き補間)。攻撃は赤いビーム予告(`Config.Threat.Damage.BeamDuration`秒だけ画面に残る、見た目専用)を出したうえで、判定タイミング(敵種別の`Telegraph`。既定`Config.Threat.Damage.DefaultTelegraph=0`)が0なら同一フレームで同期的に、正の値ならその秒数後に`task.delay`で、`resolveAttack`が距離・遮蔽を再判定してから命中判定を行う(判定タイミングと見た目の表示時間は別々の値)。撃破時は`NPCManager.killNpc`と同じ手法でラグドール化し(`CollisionGroup="Debris"`を流用)、`Config.Threat.CorpseDespawnTime`後に消える(`DestructionManager`の瓦礫キューには入れない)。`workspace.Enemies`に配置し、`Destructible`タグは付けない。`CityGenerator.GetRoadLines()`が`nil`/空を返した場合(従来モード等)は`warn`を1回出して自身を無効化し、以降は何もしない。撃破数の集計(`GetKillCounts()`。Playerオブジェクトをキーに持つ`{[Player]=number}`をシャローコピーして返す。種類は問わない合計)もここが担当し、リザルトの表示に使われる。`Clear()`で`killCounts`をリセットする(RESULTで読み終えた後のLOBBYで呼ばれるため順序は問題ない)。
-  - **降車(`DeployOnArrive`。Step3)**: `etype.DeployOnArrive=true`の敵は目的地到着時に`etype.DeployType`を`DeployCount`体生成する(`deployFromCar`)。生成は`spawnEnemy`を通り、**親の`squadId`をそのまま引き継ぐ**(引き継がないと編成の全滅判定`CountAlive(squadId)`が壊れる)。到着できないまま`DeployFallbackTime`秒経つと強制的に降ろす保険がある(「Step3の設計判断」§9-8参照。**実装済み・未検証**)。
+  - **降車(`DeployOnArrive`。Step3)**: `etype.DeployOnArrive=true`の敵は目的地到着時に`etype.DeployType`を`DeployCount`体生成する(`deployFromCar`)。生成は`spawnEnemy`を通り、**親の`squadId`をそのまま引き継ぐ**(引き継がないと編成の全滅判定`CountAlive(squadId)`が壊れる)。到着できないまま`DeployFallbackTime`秒経つと強制的に降ろす保険がある(「Step3の設計判断」§9-8参照。**コード実装済み・異常系の発火は実機未検証**)。
   - **湧き位置の分散(`DeploySquad`。Step3手順6)**: 同一`DeploySquad`呼び出し内で`usedPoints`(閉じたローカル集合)を持ち、`Movement=="road"`の個体だけがそこに書き込んで交差点の重複を避ける。それ以外の個体(警官)は`usedPoints`を避けつつ`Spawn.Jitter`の範囲でランダムにずれる(警官同士の重複は許容。理由は「Step3の設計判断」§9-5参照)。除外の結果候補が尽きた場合は`MinDistanceFromPlayer`は諦めず、重複除外だけを諦めて`warn`を出す。
   - **被弾フラッシュ(Step3手順7)**: `etype.Hits > 1`の敵(現状パトカーのみ)にだけ`Highlight`インスタンスを生成時に1個作っておき(`enemy.hitFlash`)、ダメージが入り生き残ったときだけ`Enabled`を0.12秒だけ`true`にする。撃破された場合や`HitCooldown`で無効化された被弾では発火しない。**リモートは使わない**(サーバー内で完結)。
 - **ThreatManager.lua**: 段階(★)の政策。`Config.Threat.CheckInterval`ごとにスコアを監視し、`Config.Threat.Stages`を昇順に走査して閾値を跨いだら`EnemyManager.DeploySquad`で編成を派遣する(段階固定の`if`分岐は持たない)。派遣後の追加編成の出し方は`Stages[n]`が`ReinforcementInterval`を持つかどうかで排他的に分岐する(§17参照): 持たない段階(★1)は従来どおり編成の全滅(`EnemyManager.CountAlive(squadId)==0`)を検出すると`RespawnDelay`秒後に**新しい`squadId`**で次の編成を派遣する(`waitingRespawn`フラグで二重派遣を防止)。持つ段階(★2)は生存数を一切見ず、`nextReinforcementAt`が示す一定間隔ごとに**同じ`squadId`**へ同じ`Squad`定義を無制限に追加派遣する(定期増援方式)。ラウンド境界は`Start()`/`Stop()`/`Clear()`の3メソッドで`NPCManager`と同じ作法。
@@ -336,7 +336,7 @@ StarterPlayer/StarterPlayerScripts
 | DeployRadius | 6 | 降車エフェクトの半径(Step3手順7)。降車位置の計算には使わない(ドア横固定のため) |
 | DeployInterval | 10 | 次の降車までの最短間隔(秒) |
 | MaxDeployTrips | nil(無制限) | 理由は「Step3の設計判断」§9-1参照 |
-| DeployFallbackTime | 10 | 到着できないまま降車が解禁されてからこの秒数が経つと強制的に降ろす保険。**実装済み・未検証**(「Step3の設計判断」§9-8参照) |
+| DeployFallbackTime | 10 | 到着できないまま降車が解禁されてからこの秒数が経つと強制的に降ろす保険。**コード実装済み・異常系の発火は実機未検証**(「Step3の設計判断」§9-8参照) |
 | DeploySideOffset | 4.5 | 車の中心から左右へのオフセット(車体半幅3+余裕1.5) |
 | DeployLongOffset | 2 | 車の前後方向のランダム幅(±この値) |
 | LaneOffset | 4 | 道路中心線から進行方向左側へずらす距離(左側通行) |
@@ -477,7 +477,7 @@ GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 24+108 = 132  -- St
 6. 距離昇順で`realAssigned<realCap`は`destroyBlockReal`(Anchored=false・CollisionGroup="Debris"・`SetNetworkOwner(nil)`・`applyBlastImpulse`で外向き+上向きの力・`enqueueDebris(DEBRIS_LIFETIME=8s)`)。それ以外(`excess`)は`destroyBlockExcess`(物理化せず`registerDestruction`のみ行って即`Destroy`)
 7. `excessCount>0`なら`spawnDummyDebris(map, position, radius, min(DummyCount=10, excessCount))`——爆心付近にランダム散布した軽量パーツ(`CanCollide=false`)を固定数だけ生成し、本物と同じ`applyBlastImpulse`(速度スケール0.6)をかけて`enqueueDebris(DUMMY_LIFETIME=2s)`
 8. `registerDestruction(part, ctx)`: `ctx.attacker`がいればスコア加算(`Config.Score.Block * (ctx.scoreScale or 1)`)。建物の`destroyed`は`ctx.attacker`の有無に関わらず必ずインクリメント(敵が壊した分も破壊率に含めるため)。`destroyed/total >= math.ceil(total * BonusThreshold(0.9))`かつ未受領なら、`ctx.bonusPolicy`(既定`"normal"`)が`"normal"`かつ`ctx.attacker`がいる場合のみ`BuildingBonus`加算 + `deps.addTime`があれば`RoundClock.Add(Config.Score.BuildingBonusTime, "building", ctx.attacker)`も同じ分岐内で呼ぶ(スコアとタイムを別分岐にしない。将来`bonusPolicy="deny"`を追加した際にズレが出ないようにするため)。`"collapse"`エフェクトは条件に関わらず発火(全壊は1棟につき1回)。**残骸(`tryRubbleify`)もこの`registerDestruction`を呼ぶため、全壊判定・破壊率のカウントは残骸化の有無に一切影響されない**(§20-1参照)
-9. 最後に`deps.blastListeners`配列の各関数へ`ctx`をそのまま渡して爆風を委譲(現状は`NPCManager.OnExplosion`のみ登録)
+9. 最後に`deps.blastListeners`配列の各関数へ`ctx`をそのまま渡して爆風を委譲(現状は`NPCManager.OnExplosion`と`EnemyManager.OnExplosion`の2件を登録)
 
 **瓦礫キュー**: 全瓦礫(本物+ダミー)は共通のFIFOキュー(`head`/`tail`インデックス)で`debrisCount`を管理。`debrisCount > MAX_UNANCHORED`(1000)になった瞬間、寿命に関係なく最古の瓦礫を`evictOldest`で即削除する。寿命が来た瓦礫は`TweenService`で`FadeTime`(1秒)かけて透明化してから削除(`fadeAndRemove`)。
 
@@ -504,11 +504,14 @@ GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 24+108 = 132  -- St
 
 ## 6. 確定事項
 
-- パーツ数上限: **`Config.Performance.MaxTotalParts = 20000`**
+- パーツ数上限: **`Config.Performance.MaxTotalParts = 35000`**
 - グリッドモード(`GRID_SIZE=4`)の実測総パーツ数: **14,900〜19,300**(上限35000に対して余裕あり。Step V-2で`RoadWidth`拡幅ぶんの街灯増加を含む値。切妻屋根は陸屋根の`buildSlab`より部材が少ないため、建物側は増加分を一部相殺している)
 - ブロックサイズ: **`Config.Block.Size = Vector3(8, 4, 2)`**
 - グリッドサイズ: **`GRID_SIZE = 4`**(`CityGenerator.lua`内のローカル定数)
 - タブレット実機での動作確認: **30fps維持を確認済み**(SETUP.md 6章の判定基準を満たす)
+
+現在の主要な未実装項目は、**★3戦車**、**炎・煙の時間変化**、**手作り建物のグリッド対応**の3点。
+★2軍隊、グリッド用の石垣・街小物、街小物の破壊処理は実装済み。
 
 ## 6-1. モード方針
 
@@ -523,7 +526,7 @@ GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 24+108 = 132  -- St
 
 石垣(`buildGridStoneWalls`)・街灯/車/木/ベンチ(`buildGridProps`)はStep V-1で有効化済み(§3参照)。
 
-これらを組み込む場合は`CityGenerator.Generate()`のグリッド分岐(`if USE_GRID_MODE then ... end`)内に追加実装が必要。
+手作りテンプレートを組み込む場合は`CityGenerator.Generate()`のグリッド分岐(`if USE_GRID_MODE then ... end`)内に追加実装が必要。
 
 **申し送り(Step V-3)**: 手作りテンプレートのグリッドモード有効化(上記D-1)を実装する際は、
 `placeTemplateBuilding`が生成する`clone`(手作り建物のModel)にも`model:SetAttribute("BaseY", GROUND)`
@@ -603,13 +606,13 @@ GRID_TILESIZE     = Config.City.RoadWidth + GRID_BLOCKSPAN = 24+108 = 132  -- St
 `MaxDeployTrips = nil`かつ`DeployInterval = 10`でパトカーは2台。**平均5秒に1回**この演出が出る。
 カメラシェイクや大きな効果音を付けると、爆発・全壊・タイム増減といった既存の演出が埋もれる。
 
-### 9-8. `DeployFallbackTime = 10`は「実装済み・未検証」
+### 9-8. `DeployFallbackTime = 10`は「コード実装済み・異常系の発火は実機未検証」
 
 「到着できないまま10秒経ったら強制的に降車する」保険。
 
 **通常のプレイでは発火しない。** パトカーの`MoveSpeed`(26)はプレイヤー(16)より速く、`StopDistance`も
 15と短いため、車は必ず到着する。実機テストでもログは観測されていない。したがって
-**「動作確認済み」ではなく「実装済み・未検証」として扱うこと。** この保険の本来の出番は
+**動作確認済みではない。コード上の処理は存在するが、異常系の発火は実機未検証として扱うこと。** この保険の本来の出番は
 「車が瓦礫や地形に引っかかって到着できない」といった異常系であり、狙って再現できない。
 
 **発火した場合の読み方**(ログ: `[EnemyManager] PoliceCar 強制降車(未到着) trip=N dist=NN`):
@@ -1434,7 +1437,7 @@ Step V-1の実装は棟の向きを`sizeX`/`sizeZ`の長辺基準(`sz > sx`)で�
 
 破壊されたブロックが`Destroy`で消えて更地になる問題への対処。破壊されたブロックの一部を
 `Destroy`せず、その場で潰れた黒い残骸に作り変えて地面に残す(`Config.Rubble`。§2参照)。
-今回実装したのはC-3(残骸)のみ。C-5(炎・煙の時間変化)は別ステップで扱う。
+今回実装したのはC-3(残骸)のみ。C-5(炎・煙の時間変化)は未実装で、別ステップで扱う。
 
 ### 20-1. 残骸から`BuildingId`を外す理由(全壊ボーナス・破壊率を壊さないためではない)
 
